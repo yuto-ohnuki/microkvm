@@ -1,9 +1,5 @@
-microkvm: microkvm.c guest.bin
-	gcc -O2 -Wall -o microkvm microkvm.c -lpthread
-
-guest.bin: guest.S
-	as --32 -o guest.o guest.S
-	ld -m elf_i386 -Ttext=0x0 --oformat binary -o guest.bin guest.o
+microkvm: microkvm.c uart.c uart.h
+	gcc -O2 -Wall -o microkvm microkvm.c uart.c -lpthread
 
 clean:
-	rm -f microkvm guest.o guest.bin
+	rm -f microkvm

@@ -2,3 +2,6 @@ microkvm
 guest.o
 guest.bin
 guest.elf
+bzImage
+initramfs.gz
+initramfs/

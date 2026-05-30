@@ -1,5 +1,6 @@
 #include <stdio.h>      /* printf, perror */
 #include <string.h>     /* memset, memcpy */
+#include <stdlib.h>     /* malloc, free */
 #include <stdint.h>     /* uint64_t */
 #include <fcntl.h>      /* open, O_RDWR */
 #include <unistd.h>     /* close */
@@ -8,14 +9,18 @@
 #include <sys/mman.h>   /* mmap, munmap */
 #include <sys/stat.h>   /* fstat */
 #include <linux/kvm.h>  /* KVM_* constants */
+#include "uart.h"
 
 #define MSR_CUSTOM 0x4B564D00
-#define GUEST_MEM_SIZE (1 << 20)    /* 1 MB */
-#define IO_PORT 0x10
-#define NUM_VCPUS 2
-#define VCPU1_ENTRY 0x1100          /* vCPU 1 entry point in guest binary */
+#define GUEST_MEM_SIZE (128 << 20)    /* 128 MB */
+#define NUM_VCPUS 1
 
-static int load_guest(const char *path, void *mem) {
+#define BOOT_PARAMS_ADDR 0x7000
+#define CMDLINE_ADDR     0x20000
+#define KERNEL_ADDR      0x100000
+#define CMDLINE          "console=ttyS0 earlyprintk=serial rdinit=/init"
+
+static int load_bzimage(const char *path, void *mem) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
         perror(path);
@@ -24,17 +29,74 @@ static int load_guest(const char *path, void *mem) {
 
     struct stat st;
     fstat(fd, &st);
-    read(fd, mem, st.st_size);
+
+    void *bzimage = malloc(st.st_size);
+    if (!bzimage) {
+        perror("malloc");
+        close(fd);
+        return -1;
+    }
+    read(fd, bzimage, st.st_size);
     close(fd);
-    printf("Loaded guest: %ld bytes\n", st.st_size);
+
+    /* Parse setup header */
+    uint8_t *hdr = bzimage;
+    uint8_t setup_sects = hdr[0x1F1];
+    if (setup_sects == 0)
+        setup_sects = 4;
+    uint32_t setup_size = (setup_sects + 1) * 512;
+    uint32_t kernel_size = st.st_size - setup_size;
+
+    if (memcmp(hdr + 0x202, "HdrS", 4) != 0) {
+        fprintf(stderr, "Not a valid bzImage (no HdrS magic)\n");
+        free(bzimage);
+        return -1;
+    }
+
+    uint16_t protocol = *(uint16_t *)(hdr + 0x206);
+    printf("bzImage: protocol %d.%d, setup %d bytes, kernel %d bytes\n",
+           protocol >> 8, protocol & 0xff, setup_size, kernel_size);
+
+    /* Setup boot_params (zero page) */
+    memset((char *)mem + BOOT_PARAMS_ADDR, 0, 4096);
+    memcpy((char *)mem + BOOT_PARAMS_ADDR + 0x1F1, hdr + 0x1F1, setup_size - 0x1F1);
+
+    /* Command line */
+    strcpy((char *)mem + CMDLINE_ADDR, CMDLINE);
+    *(uint32_t *)((char *)mem + BOOT_PARAMS_ADDR + 0x228) = CMDLINE_ADDR;
+
+    /* type_of_loader (required, non-zero) */
+    *((char *)mem + BOOT_PARAMS_ADDR + 0x210) = 0xFF;
+
+    /* loadflags: LOADED_HIGH | CAN_USE_HEAP */
+    *((char *)mem + BOOT_PARAMS_ADDR + 0x211) |= 0x01 | 0x80;
+
+    /* Copy protected-mode kernel to 1MB */
+    memcpy((char *)mem + KERNEL_ADDR, (char *)bzimage + setup_size, kernel_size);
+    printf("Kernel loaded at 0x%x (%d bytes)\n", KERNEL_ADDR, kernel_size);
+
+    /* e820 memory map (offset 0x2D0, each entry 20 bytes) */
+    char *e820 = (char *)mem + BOOT_PARAMS_ADDR + 0x2D0;
+    *(uint64_t *)(e820 + 0)  = 0;
+    *(uint64_t *)(e820 + 8)  = 0x9FC00;
+    *(uint32_t *)(e820 + 16) = 1;  /* E820_RAM */
+    *(uint64_t *)(e820 + 20) = 0x100000;
+    *(uint64_t *)(e820 + 28) = GUEST_MEM_SIZE - 0x100000;
+    *(uint32_t *)(e820 + 36) = 1;  /* E820_RAM */
+    *((char *)mem + BOOT_PARAMS_ADDR + 0x1E8) = 2;
+
+    free(bzimage);
     return 0;
 }
 
-/* Device state (shared between vCPUs) */
-static uint8_t device_counter = 0;
+/* Device state */
 static uint64_t msr_store = 0;
-static pthread_mutex_t dev_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_vmfd;
 
+/* UART */
+static struct uart8250 uart;
+
+/* vCPU thread */
 struct vcpu {
     int fd;
     struct kvm_run *run;
@@ -45,7 +107,6 @@ struct vcpu {
 static void *vcpu_thread(void *arg) {
     struct vcpu *vcpu = arg;
     struct kvm_run *run = vcpu->run;
-    int irq_injected = 0;
 
     for (;;) {
         if (ioctl(vcpu->fd, KVM_RUN, NULL) < 0) {
@@ -53,91 +114,49 @@ static void *vcpu_thread(void *arg) {
             return NULL;
         }
         switch (run->exit_reason) {
-            case KVM_EXIT_IO:
-                if (run->io.port == IO_PORT && run->io.direction == KVM_EXIT_IO_OUT) {
-                    char c = *(char *)((char *)run + run->io.data_offset);
-                    if (c != '\n') {
-                        pthread_mutex_lock(&dev_lock);
-                        printf("[vCPU %d][PIO out port 0x%x] %c\n", vcpu->id, run->io.port, c);
-                        pthread_mutex_unlock(&dev_lock);
-                    }
+            case KVM_EXIT_IO: {
+                uint16_t port = run->io.port;
+                uint8_t *data = (uint8_t *)((char *)run + run->io.data_offset);
+                if (port >= 0x3F8 && port <= 0x3FF) {
+                    if (run->io.direction == KVM_EXIT_IO_OUT)
+                        uart_out(&uart, port, *data, g_vmfd);
+                    else
+                        *data = uart_in(&uart, port);
+                } else if (run->io.direction == KVM_EXIT_IO_IN) {
+                    *data = 0;
                 }
                 break;
-            case KVM_EXIT_MMIO:
-                if (run->mmio.phys_addr == 0xD0000) {
-                    pthread_mutex_lock(&dev_lock);
-                    if (run->mmio.is_write) {
-                        char c = run->mmio.data[0];
-                        if (c != '\n')
-                            printf("[vCPU %d][MMIO write] %c\n", vcpu->id, c);
-                    } else {
-                        run->mmio.data[0] = device_counter++;
-                        printf("[vCPU %d][MMIO read] returning %d\n",
-                            vcpu->id, device_counter - 1);
-                    }
-                    pthread_mutex_unlock(&dev_lock);
-                }
-                break;
+            }
             case KVM_EXIT_X86_WRMSR:
                 if (run->msr.index == MSR_CUSTOM) {
-                    pthread_mutex_lock(&dev_lock);
                     msr_store = run->msr.data;
-                    printf("[vCPU %d][MSR write] 0x%x = 0x%llx\n",
-                        vcpu->id, run->msr.index, (unsigned long long)run->msr.data);
-                    pthread_mutex_unlock(&dev_lock);
                     run->msr.error = 0;
                 } else {
-                    run->msr.error = 1;     /* inject #GP for unknown MSR */
+                    run->msr.error = 1;
                 }
                 break;
             case KVM_EXIT_X86_RDMSR:
                 if (run->msr.index == MSR_CUSTOM) {
-                    pthread_mutex_lock(&dev_lock);
                     run->msr.data = msr_store;
-                    printf("[vCPU %d][MSR read] 0x%x -> 0x%llx\n",
-                        vcpu->id, run->msr.index, (unsigned long long)run->msr.data);
-                    pthread_mutex_unlock(&dev_lock);
                     run->msr.error = 0;
                 } else {
                     run->msr.error = 1;
                 }
                 break;
             case KVM_EXIT_HLT:
-                if (vcpu->id == 0 && !irq_injected) {
-                    struct kvm_interrupt irq = {
-                        .irq = 32
-                    };
-                    if (ioctl(vcpu->fd, KVM_INTERRUPT, &irq) < 0) {
-                        perror("KVM_INTERRUPT");
-                        return NULL;
-                    }
-                    irq_injected = 1;
-                } else {
-                    pthread_mutex_lock(&dev_lock);
-                    printf("[vCPU %d] halted.\n", vcpu->id);
-                    pthread_mutex_unlock(&dev_lock);
-                    return NULL;
-                }
+                break;
+            case KVM_EXIT_MMIO:
                 break;
             default:
-                fprintf(stderr, "[vCPU %d] Unexpected exit reason: %d\n",
-                    vcpu->id, run->exit_reason);
-                {
-                    struct kvm_regs regs;
-                    struct kvm_sregs sregs;
-                    ioctl(vcpu->fd, KVM_GET_REGS, &regs);
-                    ioctl(vcpu->fd, KVM_GET_SREGS, &sregs);
-                    fprintf(stderr, "  RIP=0x%llx RSP=0x%llx RFLAGS=0x%llx\n",
-                            regs.rip, regs.rsp, regs.rflags);
-                    fprintf(stderr, "  CR0=0x%llx CR3=0x%llx CR4=0x%llx\n",
-                            sregs.cr0, sregs.cr3, sregs.cr4);
-                }
+                fprintf(stderr, "Unexpected exit reason: %d\n", run->exit_reason);
                 return NULL;
         }
     }
 }
 
 int main(void) {
+    setbuf(stdout, NULL);
+
     int kvmfd, vmfd;
     int    mmap_size;
     void   *mem;
@@ -155,6 +174,10 @@ int main(void) {
         perror("KVM_CREATE_VM");
         return 1;
     }
+    g_vmfd = vmfd;
+
+    /* Create UART */
+    uart_init(&uart);
 
     /* Enable userspace MSR handling */
     struct kvm_enable_cap msr_cap = {
@@ -179,6 +202,20 @@ int main(void) {
     };
     if (ioctl(vmfd, KVM_X86_SET_MSR_FILTER, &filter) < 0) {
         perror("KVM_X86_SET_MSR_FILTER");
+        return 1;
+    }
+
+    /* Create in-kernel PIC + PIT */
+    if (ioctl(vmfd, KVM_CREATE_IRQCHIP, 0) < 0) {
+        perror("KVM_CREATE_IRQCHIP");
+        return 1;
+    }
+
+    struct kvm_pit_config pit = {
+        .flags = 0,
+    };
+    if (ioctl(vmfd, KVM_CREATE_PIT2, &pit) < 0) {
+        perror("KVM_CREATE_PIT2");
         return 1;
     }
 
@@ -213,18 +250,22 @@ int main(void) {
         return 1;
     }
 
-    /* Setup page tables for long mode (identity map, first 2 MB) */
-    uint64_t *pml4 = (uint64_t *)((char *)mem + 0x70000);
-    uint64_t *pdpt = (uint64_t *)((char *)mem + 0x71000);
-    uint64_t *pd   = (uint64_t *)((char *)mem + 0x72000);
-
-    pml4[0] = 0x71000 | 0x3;
-    pdpt[0] = 0x72000 | 0x3;
-    pd[0]   = 0x0     | 0x83;
-
-    /* Load guest binary */
-    if (load_guest("guest.bin", mem) < 0) {
+    /* Load bzImage */
+    if (load_bzimage("bzImage", mem) < 0) {
         return 1;
+    }
+
+    /* Load initramfs (required for userspace) */
+    int fd = open("initramfs.gz", O_RDONLY);
+    if (fd >= 0) {
+        struct stat st;
+        fstat(fd, &st);
+        uint32_t initrd_addr = 0x4000000;   /* 64MB */
+        read(fd, (char *)mem + initrd_addr, st.st_size);
+        close(fd);
+        *(uint32_t *)((char *)mem + BOOT_PARAMS_ADDR + 0x218) = initrd_addr;
+        *(uint32_t *)((char *)mem + BOOT_PARAMS_ADDR + 0x21C) = st.st_size;
+        printf("initramfs loaded at 0x%x (%ld bytes)\n", initrd_addr, st.st_size);
     }
 
     /* Get vcpu mmap size */
@@ -243,6 +284,32 @@ int main(void) {
             perror("KVM_CREATE_VCPU");
             return 1;
         }
+
+        /* Set CPUID — kernel's verify_cpu checks for long mode support */
+        struct {
+            struct kvm_cpuid2 header;
+            struct kvm_cpuid_entry2 entries[100];
+        } cpuid;
+        cpuid.header.nent = 100;
+        if (ioctl(kvmfd, KVM_GET_SUPPORTED_CPUID, &cpuid) < 0) {
+            perror("KVM_GET_SUPPORTED_CPUID");
+            return 1;
+        }
+        for (int j = 0; j < (int)cpuid.header.nent; j++) {
+            if (cpuid.entries[j].function == 1) {
+                cpuid.entries[j].ecx &= ~(1 << 24);  /* hide TSC-Deadline */
+                break;
+            }
+        }
+        if (ioctl(vcpus[i].fd, KVM_SET_CPUID2, &cpuid) < 0) {
+            perror("KVM_SET_CPUID2");
+            return 1;
+        }
+
+        /* Set TSC frequency (1GHz) — needed for LAPIC timer calibration */
+        ioctl(vcpus[i].fd, KVM_SET_TSC_KHZ, 1000000UL);
+
+        /* mmap kvm_run: shared page for exit information */
         vcpus[i].run = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
             MAP_SHARED, vcpus[i].fd, 0);
         if (vcpus[i].run == MAP_FAILED) {
@@ -250,51 +317,46 @@ int main(void) {
             return 1;
         }
 
-        /* Initialize registers */
+        /* Initialize registers: 32-bit protected mode (Linux Boot Protocol)
+         * Kernel's startup_32 expects flat segments with full 4GB access */
         struct kvm_sregs sregs;
-        struct kvm_regs  regs;
+        struct kvm_regs regs;
 
         if (ioctl(vcpus[i].fd, KVM_GET_SREGS, &sregs) < 0) {
             perror("KVM_GET_SREGS");
             return 1;
         }
 
-        if (i == 0) {
-            /* vCPU 0: starts in real mode at RIP=0 (goes through mode transitions) */
-            sregs.cs.base = 0;
-            sregs.cs.selector = 0;
-            sregs.efer |= (1 << 8);             /* LME - will activate after paging enabled */
+        sregs.cr0 = 0x11;              /* PE | ET (no paging — kernel enables it) */
 
-            memset(&regs, 0, sizeof(regs));
-            regs.rip = 0;
-            regs.rflags = 0x2;
-        } else {
-            /* vCPU 1: starts directly in long mode at vcpu1_entry */
-            sregs.cr0 = 0x80000011;             /* PG | PE | ET */
-            sregs.cr3 = 0x70000;                /* same page tables as vCPU 0 */
-            sregs.cr4 = 0x20;                   /* PAE */
-            sregs.efer = (1 << 8) | (1 << 10);  /* LME | LMA */
+        /* Code segment: 32-bit, flat, execute/read */
+        sregs.cs.base = 0;
+        sregs.cs.selector = 0x10;
+        sregs.cs.type = 11;            /* execute/read, accessed */
+        sregs.cs.present = 1;
+        sregs.cs.s = 1;
+        sregs.cs.db = 1;               /* 32-bit mode */
+        sregs.cs.g = 1;                /* 4KB granularity */
+        sregs.cs.limit = 0xFFFFFFFF;   /* 4GB flat */
 
-            sregs.cs.base = 0;
-            sregs.cs.selector = 0x18;           /* GDT[3]: 64-bit code */
-            sregs.cs.type = 11;                 /* execute/read, accessed */
-            sregs.cs.present = 1;
-            sregs.cs.s = 1;
-            sregs.cs.l = 1;                     /* long mode */
-            sregs.cs.g = 0;
+        /* Data segments: 32-bit, flat, read/write (all identical) */
+        sregs.ds.base = 0;
+        sregs.ds.selector = 0x18;
+        sregs.ds.type = 3;             /* read/write, accessed */
+        sregs.ds.present = 1;
+        sregs.ds.s = 1;
+        sregs.ds.db = 1;
+        sregs.ds.g = 1;
+        sregs.ds.limit = 0xFFFFFFFF;
+        sregs.es = sregs.ds;
+        sregs.fs = sregs.ds;
+        sregs.gs = sregs.ds;
+        sregs.ss = sregs.ds;
 
-            sregs.ds.base = 0;
-            sregs.ds.selector = 0x20;           /* GDT[4]: 64-bit data */
-            sregs.ds.type = 3;
-            sregs.ds.present = 1;
-            sregs.ds.s = 1;
-            sregs.ss = sregs.ds;
-
-            memset(&regs, 0, sizeof(regs));
-            regs.rip = VCPU1_ENTRY;
-            regs.rsp = 0x50000;                 /* separate stack from vCPU 0 */
-            regs.rflags = 0x2;
-        }
+        memset(&regs, 0, sizeof(regs));
+        regs.rip = KERNEL_ADDR;        /* kernel entry point (startup_32) */
+        regs.rsi = BOOT_PARAMS_ADDR;   /* boot_params pointer passed in %esi */
+        regs.rflags = 0x2;
 
         if (ioctl(vcpus[i].fd, KVM_SET_SREGS, &sregs) < 0) {
             perror("KVM_SET_SREGS");
