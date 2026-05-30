@@ -8,6 +8,7 @@
 #include <sys/stat.h>   /* fstat */
 #include <linux/kvm.h>  /* KVM_* constants */
 
+#define MSR_CUSTOM 0x4B564D00
 #define GUEST_MEM_SIZE (1 << 20)    /* 1 MB */
 #define IO_PORT 0x10
 
@@ -27,6 +28,7 @@ static int load_guest(const char *path, void *mem) {
 }
 
 static uint8_t device_counter = 0;
+static uint64_t msr_store = 0;
 
 int main(void) {
     int kvmfd, vmfd, vcpufd;
@@ -48,6 +50,32 @@ int main(void) {
     vmfd = ioctl(kvmfd, KVM_CREATE_VM, 0);
     if (vmfd < 0) {
         perror("KVM_CREATE_VM");
+        return 1;
+    }
+
+    /* Enable userspace MSR handling */
+    struct kvm_enable_cap msr_cap = {
+        .cap = KVM_CAP_X86_USER_SPACE_MSR,
+        .args[0] = KVM_MSR_EXIT_REASON_FILTER,
+    };
+    if (ioctl(vmfd, KVM_ENABLE_CAP, &msr_cap) < 0){
+        perror("KVM_CAP_X86_USER_SPACE_MSR");
+        return 1;
+    }
+
+    /* Setup MSR filter - trap custom MSR to userspace */
+    uint8_t msr_bitmap[] = {0x00};  /* bit=0: deny -> trap to userspace */
+    struct kvm_msr_filter filter = {
+        .flags = KVM_MSR_FILTER_DEFAULT_ALLOW,
+        .ranges = {{
+            .flags = KVM_MSR_FILTER_READ | KVM_MSR_FILTER_WRITE,
+            .nmsrs = 1,
+            .base = MSR_CUSTOM,
+            .bitmap = msr_bitmap,
+        }},
+    };
+    if (ioctl(vmfd, KVM_X86_SET_MSR_FILTER, &filter) < 0) {
+        perror("KVM_X86_SET_MSR_FILTER");
         return 1;
     }
 
@@ -165,6 +193,26 @@ int main(void) {
                         printf("[MMIO read  @ 0x%llx] returning %d\n",
                             run->mmio.phys_addr, device_counter - 1);
                     }
+                }
+                break;
+            case KVM_EXIT_X86_WRMSR:
+                if (run->msr.index == MSR_CUSTOM) {
+                    msr_store = run->msr.data;
+                    printf("[MSR write] 0x%x = 0x%llx\n",
+                        run->msr.index, (unsigned long long)run->msr.data);
+                    run->msr.error = 0;
+                } else {
+                    run->msr.error = 1;     /* inject #GP for unknown MSR */
+                }
+                break;
+            case KVM_EXIT_X86_RDMSR:
+                if (run->msr.index == MSR_CUSTOM) {
+                    run->msr.data = msr_store;
+                    printf("[MSR read] 0x%x -> 0x%llx\n",
+                        run->msr.index, (unsigned long long)run->msr.data);
+                    run->msr.error = 0;
+                } else {
+                    run->msr.error = 1;     /* inject #GP for unknown MSR */
                 }
                 break;
             case KVM_EXIT_HLT:

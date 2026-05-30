@@ -1,3 +1,4 @@
 microkvm
 guest.o
 guest.bin
+guest.elf
