@@ -1,1 +1,3 @@
 microkvm
+guest.o
+guest.bin

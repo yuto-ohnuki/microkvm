@@ -4,20 +4,26 @@
 #include <unistd.h>     /* close */
 #include <sys/ioctl.h>  /* ioctl */
 #include <sys/mman.h>   /* mmap, munmap */
+#include <sys/stat.h>   /* fstat */
 #include <linux/kvm.h>  /* KVM_* constants */
 
 #define GUEST_MEM_SIZE (1 << 20)    /* 1 MB */
 #define IO_PORT 0x10
 
-static const unsigned char guest_code[] = {
-    0xB0, 'H',      /* mov al, 'H' */
-    0xE6, 0x10,     /* out 0x10, al */
-    0xB0, 'i',      /* mov al, 'i' */
-    0xE6, 0x10,     /* out 0x10, al */
-    0xB0, '\n',     /* mov al, '\n' */
-    0xE6, 0x10,     /* out 0x10, al */
-    0xf4            /* hlt */
-};
+static int load_guest(const char *path, void *mem) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        perror(path);
+        return -1;
+    }
+
+    struct stat st;
+    fstat(fd, &st);
+    read(fd, mem, st.st_size);
+    close(fd);
+    printf("Loaded guest: %ld bytes\n", st.st_size);
+    return 0;
+}
 
 int main(void) {
     int kvmfd, vmfd, vcpufd;
@@ -62,7 +68,9 @@ int main(void) {
     }
 
     /* Load guest binary */
-    memcpy(mem, guest_code, sizeof(guest_code));
+    if (load_guest("guest.bin", mem) < 0) {
+        return 1;
+    }
 
     /* Create vCPU */
     vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, 0);
