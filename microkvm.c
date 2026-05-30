@@ -5,6 +5,7 @@
 #include <fcntl.h>      /* open, O_RDWR */
 #include <unistd.h>     /* close */
 #include <pthread.h>    /* threads */
+#include <termios.h>    /* tcsetattr, raw terminal mode */
 #include <sys/ioctl.h>  /* ioctl */
 #include <sys/mman.h>   /* mmap, munmap */
 #include <sys/stat.h>   /* fstat */
@@ -152,6 +153,39 @@ static void *vcpu_thread(void *arg) {
                 return NULL;
         }
     }
+}
+
+/* Terminal and stdin handling */
+static struct termios orig_termios;
+
+static void restore_terminal(void) {
+    tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
+}
+
+static void set_raw_terminal(void) {
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    atexit(restore_terminal);
+    struct termios raw = orig_termios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+}
+
+static void *stdin_thread(void *arg) {
+    (void)arg;
+    uint8_t c;
+    while (read(STDIN_FILENO, &c, 1) == 1) {
+        if (c == 0x1b) {
+            while (read(STDIN_FILENO, &c, 1) == 1) {
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+                    break;
+            }
+            continue;
+        }
+        uart_rx(&uart, c, g_vmfd);
+    }
+    return NULL;
 }
 
 int main(void) {
@@ -368,8 +402,13 @@ int main(void) {
         }
     }
 
-    /* Run the guest code */
+    /* Run */
+    set_raw_terminal();
     printf("Starting guest with %d vCPUs...\n", NUM_VCPUS);
+
+    pthread_t stdin_tid;
+    pthread_create(&stdin_tid, NULL, stdin_thread, NULL);
+
     for (int i = 0; i < NUM_VCPUS; i++) {
         pthread_create(&threads[i], NULL, vcpu_thread, &vcpus[i]);
     }
