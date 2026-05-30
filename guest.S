@@ -55,6 +55,14 @@ long_mode:
     .byte 0x88, 0x03                                   /* mov [rbx], al */
     .byte 0xB0, '\n'                                   /* mov al, '\n' */
     .byte 0x88, 0x03                                   /* mov [rbx], al */
+
+    /* MMIO read: read counter from device at 0xD0000  */
+    .byte 0x8A, 0x03                                   /* mov al, [rbx] */
+    .byte 0x04, 0x30                                   /* add al, '0' */
+    .byte 0xE6, 0x10                                   /* out 0x10, al */
+    .byte 0xB0, '\n'                                   /* mov al, '\n' */
+    .byte 0xE6, 0x10                                   /* out 0x10, al */
+
     .byte 0xF4                                         /* hlt */
 
 /* ============ Data ============ */

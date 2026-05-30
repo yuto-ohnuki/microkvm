@@ -26,6 +26,8 @@ static int load_guest(const char *path, void *mem) {
     return 0;
 }
 
+static uint8_t device_counter = 0;
+
 int main(void) {
     int kvmfd, vmfd, vcpufd;
     struct kvm_sregs    sregs;
@@ -152,10 +154,16 @@ int main(void) {
                 }
                 break;
             case KVM_EXIT_MMIO:
-                if (run->mmio.phys_addr == 0xD0000 && run->mmio.is_write) {
-                    char c = run->mmio.data[0];
-                    if (c != '\n')
-                        printf("[MMIO write @ 0x%llx] %c\n", run->mmio.phys_addr, c);
+                if (run->mmio.phys_addr == 0xD0000) {
+                    if (run->mmio.is_write) {
+                        char c = run->mmio.data[0];
+                        if (c != '\n')
+                            printf("[MMIO write @ 0x%llx] %c\n", run->mmio.phys_addr, c);
+                    } else {
+                        run->mmio.data[0] = device_counter++;
+                        printf("[MMIO read  @ 0x%llx] returning %d\n",
+                            run->mmio.phys_addr, device_counter - 1);
+                    }
                 }
                 break;
             case KVM_EXIT_HLT:
