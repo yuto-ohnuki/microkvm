@@ -136,3 +136,12 @@ idt_desc:
 gdt_desc:
     .word gdt_desc - gdt - 1         /* limit: size of GDT - 1 */
     .long gdt                        /* base: address of GDT */
+
+/* === vCPU 1 entry point (long mode) === */
+.org 0x1100
+vcpu1_entry:
+    .byte 0x48, 0xC7, 0xC3, 0x00, 0x00, 0x0D, 0x00     /* mov rbx, 0xD0000 */
+    .byte 0x8A, 0x03                                   /* mov al, [rbx] */
+    .byte 0x04, 0x30                                   /* add al, '0' */
+    .byte 0xE6, 0x10                                   /* out 0x10, al */
+    .byte 0xF4                                         /* hlt */

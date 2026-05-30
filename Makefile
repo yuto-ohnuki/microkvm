@@ -1,5 +1,5 @@
 microkvm: microkvm.c guest.bin
-	gcc -O2 -Wall -o microkvm microkvm.c
+	gcc -O2 -Wall -o microkvm microkvm.c -lpthread
 
 guest.bin: guest.S
 	as --32 -o guest.o guest.S

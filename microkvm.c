@@ -3,6 +3,7 @@
 #include <stdint.h>     /* uint64_t */
 #include <fcntl.h>      /* open, O_RDWR */
 #include <unistd.h>     /* close */
+#include <pthread.h>    /* threads */
 #include <sys/ioctl.h>  /* ioctl */
 #include <sys/mman.h>   /* mmap, munmap */
 #include <sys/stat.h>   /* fstat */
@@ -11,6 +12,8 @@
 #define MSR_CUSTOM 0x4B564D00
 #define GUEST_MEM_SIZE (1 << 20)    /* 1 MB */
 #define IO_PORT 0x10
+#define NUM_VCPUS 2
+#define VCPU1_ENTRY 0x1100          /* vCPU 1 entry point in guest binary */
 
 static int load_guest(const char *path, void *mem) {
     int fd = open(path, O_RDONLY);
@@ -27,17 +30,117 @@ static int load_guest(const char *path, void *mem) {
     return 0;
 }
 
+/* Device state (shared between vCPUs) */
 static uint8_t device_counter = 0;
 static uint64_t msr_store = 0;
+static pthread_mutex_t dev_lock = PTHREAD_MUTEX_INITIALIZER;
+
+struct vcpu {
+    int fd;
+    struct kvm_run *run;
+    int id;
+    size_t mmap_size;
+};
+
+static void *vcpu_thread(void *arg) {
+    struct vcpu *vcpu = arg;
+    struct kvm_run *run = vcpu->run;
+    int irq_injected = 0;
+
+    for (;;) {
+        if (ioctl(vcpu->fd, KVM_RUN, NULL) < 0) {
+            perror("KVM_RUN");
+            return NULL;
+        }
+        switch (run->exit_reason) {
+            case KVM_EXIT_IO:
+                if (run->io.port == IO_PORT && run->io.direction == KVM_EXIT_IO_OUT) {
+                    char c = *(char *)((char *)run + run->io.data_offset);
+                    if (c != '\n') {
+                        pthread_mutex_lock(&dev_lock);
+                        printf("[vCPU %d][PIO out port 0x%x] %c\n", vcpu->id, run->io.port, c);
+                        pthread_mutex_unlock(&dev_lock);
+                    }
+                }
+                break;
+            case KVM_EXIT_MMIO:
+                if (run->mmio.phys_addr == 0xD0000) {
+                    pthread_mutex_lock(&dev_lock);
+                    if (run->mmio.is_write) {
+                        char c = run->mmio.data[0];
+                        if (c != '\n')
+                            printf("[vCPU %d][MMIO write] %c\n", vcpu->id, c);
+                    } else {
+                        run->mmio.data[0] = device_counter++;
+                        printf("[vCPU %d][MMIO read] returning %d\n",
+                            vcpu->id, device_counter - 1);
+                    }
+                    pthread_mutex_unlock(&dev_lock);
+                }
+                break;
+            case KVM_EXIT_X86_WRMSR:
+                if (run->msr.index == MSR_CUSTOM) {
+                    pthread_mutex_lock(&dev_lock);
+                    msr_store = run->msr.data;
+                    printf("[vCPU %d][MSR write] 0x%x = 0x%llx\n",
+                        vcpu->id, run->msr.index, (unsigned long long)run->msr.data);
+                    pthread_mutex_unlock(&dev_lock);
+                    run->msr.error = 0;
+                } else {
+                    run->msr.error = 1;     /* inject #GP for unknown MSR */
+                }
+                break;
+            case KVM_EXIT_X86_RDMSR:
+                if (run->msr.index == MSR_CUSTOM) {
+                    pthread_mutex_lock(&dev_lock);
+                    run->msr.data = msr_store;
+                    printf("[vCPU %d][MSR read] 0x%x -> 0x%llx\n",
+                        vcpu->id, run->msr.index, (unsigned long long)run->msr.data);
+                    pthread_mutex_unlock(&dev_lock);
+                    run->msr.error = 0;
+                } else {
+                    run->msr.error = 1;
+                }
+                break;
+            case KVM_EXIT_HLT:
+                if (vcpu->id == 0 && !irq_injected) {
+                    struct kvm_interrupt irq = {
+                        .irq = 32
+                    };
+                    if (ioctl(vcpu->fd, KVM_INTERRUPT, &irq) < 0) {
+                        perror("KVM_INTERRUPT");
+                        return NULL;
+                    }
+                    irq_injected = 1;
+                } else {
+                    pthread_mutex_lock(&dev_lock);
+                    printf("[vCPU %d] halted.\n", vcpu->id);
+                    pthread_mutex_unlock(&dev_lock);
+                    return NULL;
+                }
+                break;
+            default:
+                fprintf(stderr, "[vCPU %d] Unexpected exit reason: %d\n",
+                    vcpu->id, run->exit_reason);
+                {
+                    struct kvm_regs regs;
+                    struct kvm_sregs sregs;
+                    ioctl(vcpu->fd, KVM_GET_REGS, &regs);
+                    ioctl(vcpu->fd, KVM_GET_SREGS, &sregs);
+                    fprintf(stderr, "  RIP=0x%llx RSP=0x%llx RFLAGS=0x%llx\n",
+                            regs.rip, regs.rsp, regs.rflags);
+                    fprintf(stderr, "  CR0=0x%llx CR3=0x%llx CR4=0x%llx\n",
+                            sregs.cr0, sregs.cr3, sregs.cr4);
+                }
+                return NULL;
+        }
+    }
+}
 
 int main(void) {
-    int kvmfd, vmfd, vcpufd;
-    struct kvm_sregs    sregs;
-    struct kvm_regs     regs;
-    struct kvm_run      *run;
+    int kvmfd, vmfd;
     int    mmap_size;
     void   *mem;
-    int    irq_injected = 0;
 
     /* Open /dev/kvm */
     kvmfd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
@@ -124,124 +227,101 @@ int main(void) {
         return 1;
     }
 
-    /* Create vCPU */
-    vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, 0);
-    if (vcpufd < 0) {
-        perror("KVM_CREATE_VCPU");
-        return 1;
-    }
+    /* Get vcpu mmap size */
+    mmap_size = ioctl(kvmfd, KVM_GET_VCPU_MMAP_SIZE, NULL);
 
-    /* mmap the kvm_run structure */
-    mmap_size = ioctl(kvmfd, KVM_GET_VCPU_MMAP_SIZE, 0);
-    if (mmap_size < 0) {
-        perror("KVM_GET_VCPU_MMAP_SIZE");
-        return 1;
-    }
-    run = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
-        MAP_SHARED, vcpufd, 0);
-    if (run == MAP_FAILED) {
-        perror("mmap vcpu");
-        return 1;
-    }
+    /* Create vCPUs and initialize */
+    struct vcpu vcpus[NUM_VCPUS];
+    pthread_t threads[NUM_VCPUS];
 
-    /* Initialization registers */
-    /* Special registers: set CS to point to address 0 */
-    if (ioctl(vcpufd, KVM_GET_SREGS, &sregs) < 0) {
-        perror("KVM_GET_SREGS");
-        return 1;
-    }
-    sregs.cs.base = 0;
-    sregs.cs.selector = 0;
-    sregs.efer |= (1 << 8);
-    if (ioctl(vcpufd, KVM_SET_SREGS, &sregs) < 0) {
-        perror("KVM_SET_SREGS");
-        return 1;
-    }
+    for (int i = 0; i < NUM_VCPUS; i++) {
+        vcpus[i].id = i;
+        vcpus[i].mmap_size = mmap_size;
 
-    /* General registers: set IP to 0 (start of guest mode) */
-    memset(&regs, 0, sizeof(regs));
-    regs.rip = 0;
-    regs.rflags = 0x2;  /* bit 1 is always on x86 */
-    if (ioctl(vcpufd, KVM_SET_REGS, &regs) < 0) {
-        perror("KVM_SET_REGS");
-        return 1;
+        vcpus[i].fd = ioctl(vmfd, KVM_CREATE_VCPU, i);
+        if (vcpus[i].fd < 0) {
+            perror("KVM_CREATE_VCPU");
+            return 1;
+        }
+        vcpus[i].run = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
+            MAP_SHARED, vcpus[i].fd, 0);
+        if (vcpus[i].run == MAP_FAILED) {
+            perror("mmap vcpu");
+            return 1;
+        }
+
+        /* Initialize registers */
+        struct kvm_sregs sregs;
+        struct kvm_regs  regs;
+
+        if (ioctl(vcpus[i].fd, KVM_GET_SREGS, &sregs) < 0) {
+            perror("KVM_GET_SREGS");
+            return 1;
+        }
+
+        if (i == 0) {
+            /* vCPU 0: starts in real mode at RIP=0 (goes through mode transitions) */
+            sregs.cs.base = 0;
+            sregs.cs.selector = 0;
+            sregs.efer |= (1 << 8);             /* LME - will activate after paging enabled */
+
+            memset(&regs, 0, sizeof(regs));
+            regs.rip = 0;
+            regs.rflags = 0x2;
+        } else {
+            /* vCPU 1: starts directly in long mode at vcpu1_entry */
+            sregs.cr0 = 0x80000011;             /* PG | PE | ET */
+            sregs.cr3 = 0x70000;                /* same page tables as vCPU 0 */
+            sregs.cr4 = 0x20;                   /* PAE */
+            sregs.efer = (1 << 8) | (1 << 10);  /* LME | LMA */
+
+            sregs.cs.base = 0;
+            sregs.cs.selector = 0x18;           /* GDT[3]: 64-bit code */
+            sregs.cs.type = 11;                 /* execute/read, accessed */
+            sregs.cs.present = 1;
+            sregs.cs.s = 1;
+            sregs.cs.l = 1;                     /* long mode */
+            sregs.cs.g = 0;
+
+            sregs.ds.base = 0;
+            sregs.ds.selector = 0x20;           /* GDT[4]: 64-bit data */
+            sregs.ds.type = 3;
+            sregs.ds.present = 1;
+            sregs.ds.s = 1;
+            sregs.ss = sregs.ds;
+
+            memset(&regs, 0, sizeof(regs));
+            regs.rip = VCPU1_ENTRY;
+            regs.rsp = 0x50000;                 /* separate stack from vCPU 0 */
+            regs.rflags = 0x2;
+        }
+
+        if (ioctl(vcpus[i].fd, KVM_SET_SREGS, &sregs) < 0) {
+            perror("KVM_SET_SREGS");
+            return 1;
+        }
+        if (ioctl(vcpus[i].fd, KVM_SET_REGS, &regs) < 0) {
+            perror("KVM_SET_REGS");
+            return 1;
+        }
     }
 
     /* Run the guest code */
-    printf("Starting guest...\n");
-    for (;;) {
-        if (ioctl(vcpufd, KVM_RUN, NULL) < 0) {
-            perror("KVM_RUN");
-            return 1;
-        }
-        switch (run->exit_reason) {
-            case KVM_EXIT_IO:
-                if (run->io.port == IO_PORT && run->io.direction == KVM_EXIT_IO_OUT) {
-                    char c = *(char *)((char *)run + run->io.data_offset);
-                    if (c != '\n')
-                        printf("[PIO out port 0x%x] %c\n", run->io.port, c);
-                }
-                break;
-            case KVM_EXIT_MMIO:
-                if (run->mmio.phys_addr == 0xD0000) {
-                    if (run->mmio.is_write) {
-                        char c = run->mmio.data[0];
-                        if (c != '\n')
-                            printf("[MMIO write @ 0x%llx] %c\n", run->mmio.phys_addr, c);
-                    } else {
-                        run->mmio.data[0] = device_counter++;
-                        printf("[MMIO read  @ 0x%llx] returning %d\n",
-                            run->mmio.phys_addr, device_counter - 1);
-                    }
-                }
-                break;
-            case KVM_EXIT_X86_WRMSR:
-                if (run->msr.index == MSR_CUSTOM) {
-                    msr_store = run->msr.data;
-                    printf("[MSR write] 0x%x = 0x%llx\n",
-                        run->msr.index, (unsigned long long)run->msr.data);
-                    run->msr.error = 0;
-                } else {
-                    run->msr.error = 1;     /* inject #GP for unknown MSR */
-                }
-                break;
-            case KVM_EXIT_X86_RDMSR:
-                if (run->msr.index == MSR_CUSTOM) {
-                    run->msr.data = msr_store;
-                    printf("[MSR read] 0x%x -> 0x%llx\n",
-                        run->msr.index, (unsigned long long)run->msr.data);
-                    run->msr.error = 0;
-                } else {
-                    run->msr.error = 1;     /* inject #GP for unknown MSR */
-                }
-                break;
-            case KVM_EXIT_HLT:
-                if (!irq_injected) {
-                    struct kvm_interrupt irq = {
-                        .irq = 32
-                    };
-                    if (ioctl(vcpufd, KVM_INTERRUPT, &irq) < 0) {
-                        perror("KVM_INTERRUPT");
-                        return 1;
-                    }
-                    irq_injected = 1;
-                } else {
-                    printf("Guest halted.\n");
-                    goto done;
-                }
-                break;
-            default:
-                fprintf(stderr, "Unexpected exit reason: %d\n", run->exit_reason);
-                break;
-        }
+    printf("Starting guest with %d vCPUs...\n", NUM_VCPUS);
+    for (int i = 0; i < NUM_VCPUS; i++) {
+        pthread_create(&threads[i], NULL, vcpu_thread, &vcpus[i]);
+    }
+    for (int i = 0; i < NUM_VCPUS; i++) {
+        pthread_join(threads[i], NULL);
     }
 
-done:
-    /* Cleanup */
-    close(vcpufd);
+    /* Cleanup*/
+    for (int i = 0; i < NUM_VCPUS; i++) {
+        munmap(vcpus[i].run, mmap_size);
+        close(vcpus[i].fd);
+    }
     close(vmfd);
     close(kvmfd);
-    munmap(run, mmap_size);
     munmap(mem, GUEST_MEM_SIZE);
     return 0;
 }
