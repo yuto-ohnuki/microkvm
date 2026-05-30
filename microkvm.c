@@ -7,9 +7,16 @@
 #include <linux/kvm.h>  /* KVM_* constants */
 
 #define GUEST_MEM_SIZE (1 << 20)    /* 1 MB */
+#define IO_PORT 0x10
 
 static const unsigned char guest_code[] = {
-    0xf4   /* hlt */
+    0xB0, 'H',      /* mov al, 'H' */
+    0xE6, 0x10,     /* out 0x10, al */
+    0xB0, 'i',      /* mov al, 'i' */
+    0xE6, 0x10,     /* out 0x10, al */
+    0xB0, '\n',     /* mov al, '\n' */
+    0xE6, 0x10,     /* out 0x10, al */
+    0xf4            /* hlt */
 };
 
 int main(void) {
@@ -101,21 +108,27 @@ int main(void) {
 
     /* Run the guest code */
     printf("Starting guest...\n");
-    if (ioctl(vcpufd, KVM_RUN, NULL) < 0) {
-        perror("KVM_RUN");
-        return 1;
+    for (;;) {
+        if (ioctl(vcpufd, KVM_RUN, NULL) < 0) {
+            perror("KVM_RUN");
+            return 1;
+        }
+        switch (run->exit_reason) {
+            case KVM_EXIT_IO:
+                if (run->io.port == IO_PORT && run->io.direction == KVM_EXIT_IO_OUT) {
+                    putchar(*(char *)((char *)run + run->io.data_offset));
+                }
+                break;
+            case KVM_EXIT_HLT:
+                printf("Guest halted.\n");
+                goto done;
+            default:
+                fprintf(stderr, "Unexpected exit reason: %d\n", run->exit_reason);
+                break;
+        }
     }
 
-    printf("Exit reason: %d\n", run->exit_reason);
-    switch(run->exit_reason) {
-        case KVM_EXIT_HLT:
-            printf("Guest executed HLT. Success!\n");
-            break;
-        default:
-            fprintf(stderr, "Unexpected exit reason: %d\n", run->exit_reason);
-            break;
-    }
-
+done:
     /* Cleanup */
     close(vcpufd);
     close(vmfd);
