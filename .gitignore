@@ -4,4 +4,5 @@ guest.bin
 guest.elf
 bzImage
 initramfs.gz
-initramfs/init
+initramfs/
+init
