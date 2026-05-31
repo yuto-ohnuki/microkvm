@@ -176,4 +176,4 @@ This execution model remains unchanged throughout the rest of the project.
 
 ## Next step
 
-[Step 3: Real → protected mode](step3_protected-mode.md) - separate guest code into an assembly file, set up a GDT, and transition the CPU from 16-bit real mode to 32-bit protected mode.
+[Step 3: Real → protected mode](step03_protected-mode.md) - separate guest code into an assembly file, set up a GDT, and transition the CPU from 16-bit real mode to 32-bit protected mode.

@@ -218,4 +218,4 @@ the CPU executes an ordinary store instruction to a physical address. In this st
 
 ## Next step
 
-[Step 6: MMIO read + device state](step6_mmio-read.md) - add MMIO read support so the guest can query device state, completing the bidirectional device model.
+[Step 6: MMIO read + device state](step06_mmio-read.md) - add MMIO read support so the guest can query device state, completing the bidirectional device model.

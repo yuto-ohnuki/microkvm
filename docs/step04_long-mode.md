@@ -243,4 +243,4 @@ microkvm follows the same architectural requirements, but uses the smallest poss
 
 ## Next step
 
-[Step 5: MMIO device emulation](step5_mmio.md) - split the memory region to create a hole in guest physical address space, and handle `KVM_EXIT_MMIO` for device emulation.
+[Step 5: MMIO device emulation](step05_mmio.md) - split the memory region to create a hole in guest physical address space, and handle `KVM_EXIT_MMIO` for device emulation.

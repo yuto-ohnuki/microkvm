@@ -225,4 +225,4 @@ Decoded:
 
 ## Next step
 
-[Step 4: Protected → long mode](step4_long-mode.md) — set up page tables, enable PAE and paging, and transition to 64-bit long mode.
+[Step 4: Protected → long mode](step04_long-mode.md) — set up page tables, enable PAE and paging, and transition to 64-bit long mode.

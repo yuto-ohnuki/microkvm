@@ -175,4 +175,4 @@ Return value: 0
 
 ## Next step
 
-[Step 7: Interrupt injection](step7_irq.md) — so far, every interaction has been initiated by the guest. In the next step, the host will asynchronously notify the guest using an interrupt, introducing the opposite direction of communication: host → guest.
+[Step 7: Interrupt injection](step07_irq.md) — so far, every interaction has been initiated by the guest. In the next step, the host will asynchronously notify the guest using an interrupt, introducing the opposite direction of communication: host → guest.

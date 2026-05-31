@@ -250,4 +250,4 @@ This is the pattern every real device follows: the driver writes commands, reads
 
 ## Next step
 
-[Step 8: MSR handling](step8_msr.md) - trap and emulate Model-Specific Register accesses using `KVM_EXIT_X86_WRMSR` / `KVM_EXIT_X86_RDMSR`, completing the set of VM exit types.
+[Step 8: MSR handling](step08_msr.md) - trap and emulate Model-Specific Register accesses using `KVM_EXIT_X86_WRMSR` / `KVM_EXIT_X86_RDMSR`, completing the set of VM exit types.

@@ -172,4 +172,4 @@ All later steps keep this structure and only add one new concept at a time.
 
 ## Next step
 
-[Step 2: I/O port character output](step2_io-port.md) — add an exit handler loop and use PIO (`out` instruction) to send characters from guest to host.
+[Step 2: I/O port character output](step02_io-port.md) — add an exit handler loop and use PIO (`out` instruction) to send characters from guest to host.

@@ -218,4 +218,4 @@ With these exit types, a VMM can implement a surprisingly large subset of device
 
 ## Next step
 
-[Step 9: Multiple vCPUs](step9_multi-vcpu.md) - so far, the VM has consisted of a single virtual CPU. Real systems are multicore. The next step introduces multiple vCPUs sharing the same guest memory and device state, requiring synchronization between host threads.
+[Step 9: Multiple vCPUs](step09_multi-vcpu.md) - so far, the VM has consisted of a single virtual CPU. Real systems are multicore. The next step introduces multiple vCPUs sharing the same guest memory and device state, requiring synchronization between host threads.
