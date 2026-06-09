@@ -11,6 +11,7 @@
 #include <sys/stat.h>   /* fstat */
 #include <linux/kvm.h>  /* KVM_* constants */
 #include "uart.h"
+#include "virtio_mmio.h"
 
 #define MSR_CUSTOM 0x4B564D00
 #define GUEST_MEM_SIZE (128 << 20)    /* 128 MB */
@@ -19,7 +20,7 @@
 #define BOOT_PARAMS_ADDR 0x7000
 #define CMDLINE_ADDR     0x20000
 #define KERNEL_ADDR      0x100000
-#define CMDLINE          "console=ttyS0 earlyprintk=serial rdinit=/init"
+#define CMDLINE          "console=ttyS0 earlyprintk=serial virtio_mmio.device=0x200@0xd0000000:5"
 
 static int load_bzimage(const char *path, void *mem) {
     int fd = open(path, O_RDONLY);
@@ -94,8 +95,9 @@ static int load_bzimage(const char *path, void *mem) {
 static uint64_t msr_store = 0;
 static int g_vmfd;
 
-/* UART */
+/* Devices */
 static struct uart8250 uart;
+static struct virtio_mmio_dev virtio_dev;
 
 /* vCPU thread */
 struct vcpu {
@@ -146,8 +148,22 @@ static void *vcpu_thread(void *arg) {
                 break;
             case KVM_EXIT_HLT:
                 break;
-            case KVM_EXIT_MMIO:
+            case KVM_EXIT_MMIO: {
+                uint64_t addr = run->mmio.phys_addr;
+                if (addr >= VIRTIO_MMIO_BASE &&
+                    addr < VIRTIO_MMIO_BASE + VIRTIO_MMIO_SIZE) {
+                    uint64_t offset = addr - VIRTIO_MMIO_BASE;
+                    if (run->mmio.is_write) {
+                        uint32_t val = 0;
+                        memcpy(&val, run->mmio.data, run->mmio.len);
+                        virtio_mmio_write(&virtio_dev, offset, val, run->mmio.len);
+                    } else {
+                        uint32_t val = virtio_mmio_read(&virtio_dev, offset, run->mmio.len);
+                        memcpy(run->mmio.data, &val, run->mmio.len);
+                    }
+                }
                 break;
+            }
             default:
                 fprintf(stderr, "Unexpected exit reason: %d\n", run->exit_reason);
                 return NULL;
@@ -210,8 +226,9 @@ int main(void) {
     }
     g_vmfd = vmfd;
 
-    /* Create UART */
+    /* Initialize devices */
     uart_init(&uart);
+    virtio_mmio_init(&virtio_dev);
 
     /* Enable userspace MSR handling */
     struct kvm_enable_cap msr_cap = {
