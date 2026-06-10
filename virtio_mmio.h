@@ -94,6 +94,9 @@ struct vring_used {
 /* RX: write data into receiveq and raise interrupt */
 int virtio_console_rx(struct virtio_mmio_dev *dev, const uint8_t *data, size_t len);
 
+/* TX: process transmitq and write payload to stdout */
+void virtio_console_tx(struct virtio_mmio_dev *dev, uint8_t *ram, size_t ram_size);
+
 void virtio_mmio_init(struct virtio_mmio_dev *dev);
 void virtio_mmio_write(struct virtio_mmio_dev *dev, uint64_t offset,
                        uint32_t value, int len);
