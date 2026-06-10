@@ -59,6 +59,7 @@ struct virtio_mmio_dev {
     uint32_t guest_features;
     uint32_t guest_page_size;
     uint32_t queue_sel;
+    uint32_t interrupt_status;
     struct virtqueue_state vqs[VIRTQ_NUM_QUEUES];
     uint8_t *ram;
     size_t  ram_size;
@@ -89,6 +90,9 @@ struct vring_used {
     uint16_t idx;       /* next slot device will fill */
     struct vring_used_elem ring[];
 };
+
+/* RX: write data into receiveq and raise interrupt */
+int virtio_console_rx(struct virtio_mmio_dev *dev, const uint8_t *data, size_t len);
 
 void virtio_mmio_init(struct virtio_mmio_dev *dev);
 void virtio_mmio_write(struct virtio_mmio_dev *dev, uint64_t offset,

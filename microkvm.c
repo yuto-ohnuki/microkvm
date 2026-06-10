@@ -191,15 +191,42 @@ static void set_raw_terminal(void) {
 static void *stdin_thread(void *arg) {
     (void)arg;
     uint8_t c;
+    int virtio_mode = 0;
+
     while (read(STDIN_FILENO, &c, 1) == 1) {
-        if (c == 0x1b) {
-            while (read(STDIN_FILENO, &c, 1) == 1) {
-                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
-                    break;
+        /* Ctrl-A = monitor escape */
+        if (c == 0x01) {
+            if (read(STDIN_FILENO, &c, 1) != 1) break;
+            if (c == 'v') {
+                virtio_mode = !virtio_mode;
+                fprintf(stderr, "\n[monitor] input → %s\n",
+                    virtio_mode ? "hvc0 (virtio)" : "ttyS0 (UART)");
+                if (!virtio_mode)
+                    uart_rx(&uart, '\n', g_vmfd);
+                continue;
             }
             continue;
         }
-        uart_rx(&uart, c, g_vmfd);
+
+        /* Escape sequence skip */
+        if (c == 0x1b) {
+            while (read(STDIN_FILENO, &c, 1) == 1) {
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) break;
+            }
+            continue;
+        }
+
+        if (virtio_mode) {
+            if (virtio_console_rx(&virtio_dev, &c, 1) == 0) {
+                /* Inject IRQ 5 (edge-triggered: assert then deassert) */
+                struct kvm_irq_level irq = { .irq = 5, .level = 1 };
+                ioctl(g_vmfd, KVM_IRQ_LINE, &irq);
+                irq.level = 0;
+                ioctl(g_vmfd, KVM_IRQ_LINE, &irq);
+            }
+        } else {
+            uart_rx(&uart, c, g_vmfd);
+        }
     }
     return NULL;
 }
