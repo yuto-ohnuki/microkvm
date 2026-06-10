@@ -319,6 +319,10 @@ int main(void) {
         printf("initramfs loaded at 0x%x (%ld bytes)\n", initrd_addr, st.st_size);
     }
 
+    /* Give virtio device access to guest memory */
+    virtio_dev.ram = (uint8_t *)mem;
+    virtio_dev.ram_size = GUEST_MEM_SIZE;
+
     /* Get vcpu mmap size */
     mmap_size = ioctl(kvmfd, KVM_GET_VCPU_MMAP_SIZE, NULL);
 
