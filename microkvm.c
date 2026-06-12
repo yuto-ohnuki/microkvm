@@ -315,6 +315,47 @@ static void *vcpu_thread(void *arg) {
     return NULL;
 }
 
+/* Dirty page tracking */
+static void print_dirty_log(int vmfd, size_t mem_size) {
+    /* Slot 0: 0 - 0xD0000 (832KB = 208 pages) */
+    size_t slot0_pages = 0xD0000 / 4096;
+    size_t slot0_bitmap_sz = (slot0_pages + 63) / 64 * 8;
+    uint64_t *bitmap0 = calloc(1, slot0_bitmap_sz);
+
+    /* Slot 1: 0xD1000 - end (128MB - 0xD1000) */
+    size_t slot1_pages = (mem_size - 0xD1000) / 4096;
+    size_t slot1_bitmap_sz = (slot1_pages + 63) / 64 * 8;
+    uint64_t *bitmap1 = calloc(1, slot1_bitmap_sz);
+
+    struct kvm_dirty_log log0 = { .slot = 0, .dirty_bitmap = bitmap0 };
+    struct kvm_dirty_log log1 = { .slot = 1, .dirty_bitmap = bitmap1 };
+
+    if (ioctl(vmfd, KVM_GET_DIRTY_LOG, &log0) < 0)
+        perror("KVM_GET_DIRTY_LOG slot 0");
+    if (ioctl(vmfd, KVM_GET_DIRTY_LOG, &log1) < 0)
+        perror("KVM_GET_DIRTY_LOG slot 1");
+
+    /* Count dirty pages */
+    uint64_t dirty0 = 0, dirty1 = 0;
+    for (size_t i = 0; i < slot0_bitmap_sz / 8; i++)
+        dirty0 += __builtin_popcountll(bitmap0[i]);
+    for (size_t i = 0; i < slot1_bitmap_sz / 8; i++)
+        dirty1 += __builtin_popcountll(bitmap1[i]);
+
+    uint64_t total = dirty0 + dirty1;
+    fprintf(stderr, "\n=== Dirty page report (Ctrl-A d) ===\n");
+    fprintf(stderr, "  Slot 0 [0x0-0xD0000]:       %llu / %zu pages dirty\n",
+            (unsigned long long)dirty0, slot0_pages);
+    fprintf(stderr, "  Slot 1 [0xD1000-0x%lx]:  %llu / %zu pages dirty\n",
+            (unsigned long)mem_size, (unsigned long long)dirty1, slot1_pages);
+    fprintf(stderr, "  Total:                      %llu pages (%llu KB)\n",
+            (unsigned long long)total, (unsigned long long)(total * 4));
+    fprintf(stderr, "====================================\n");
+
+    free(bitmap0);
+    free(bitmap1);
+}
+
 /* Terminal and stdin handling */
 static struct termios orig_termios;
 
@@ -347,6 +388,10 @@ static void *stdin_thread(void *arg) {
                     virtio_mode ? "hvc0 (virtio)" : "ttyS0 (UART)");
                 if (!virtio_mode)
                     uart_rx(&uart, '\n', g_vmfd);
+                continue;
+            }
+            if (c == 'd') {
+                print_dirty_log(g_vmfd, GUEST_MEM_SIZE);
                 continue;
             }
             continue;
@@ -510,6 +555,7 @@ int main(void) {
     /* Register memory with KVM - split into two regions, leaving MMIO hole */
     struct kvm_userspace_memory_region region1 = {
         .slot = 0,
+        .flags = KVM_MEM_LOG_DIRTY_PAGES,
         .guest_phys_addr = 0,
         .memory_size = 0xD0000,
         .userspace_addr = (unsigned long)mem,
@@ -521,6 +567,7 @@ int main(void) {
 
     struct kvm_userspace_memory_region region2 = {
         .slot = 1,
+        .flags = KVM_MEM_LOG_DIRTY_PAGES,
         .guest_phys_addr = 0xD1000,
         .memory_size = GUEST_MEM_SIZE - 0xD1000,
         .userspace_addr = (unsigned long)mem + 0xD1000,
