@@ -6,3 +6,4 @@ bzImage
 initramfs.gz
 initramfs/
 init
+snapshot.bin
