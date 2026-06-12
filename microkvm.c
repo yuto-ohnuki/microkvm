@@ -69,6 +69,10 @@ static void sigint_handler(int sig) {
     stop_requested = 1;
 }
 
+/* Live migration status */
+static struct migrate_context g_migrate_ctx;
+static int g_migrate_active = 0;
+
 /* Exit stats counters */
 static uint64_t mmio_exit_count = 0;
 static uint64_t ioeventfd_kick_count = 0;
@@ -404,6 +408,16 @@ static void *stdin_thread(void *arg) {
                 stop_requested = 1;
                 continue;
             }
+            if (c == 'm') {
+                fprintf(stderr, "\n[monitor] starting live migration...\n");
+                /* Pre-copy runs here while VM is still live */
+                if (migrate_precopy("migration.bin", g_vmfd, virtio_dev.ram,
+                                    GUEST_MEM_SIZE, &g_migrate_ctx) == 0) {
+                    g_migrate_active = 1;
+                }
+                stop_requested = 1;
+                continue;
+            }
             continue;
         }
 
@@ -447,6 +461,11 @@ int main(int argc, char *argv[]) {
     char *restore_path = NULL;
     if (argc > 2 && strcmp(argv[1], "--restore") == 0)
         restore_path = argv[2];
+
+    /* Step 22: check for --restore-migration mode */
+    char *migrate_restore_path = NULL;
+    if (argc > 2 && strcmp(argv[1], "--restore-migration") == 0)
+        migrate_restore_path = argv[2];
 
     /* Parse runtime flags from environment */
     use_ioeventfd = (getenv("USE_IOEVENTFD") != NULL);
@@ -594,7 +613,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Load bzImage - skip if restoring */
-    if (!restore_path) {
+    if (!restore_path && !migrate_restore_path) {
         if (load_bzimage("bzImage", mem) < 0) {
             return 1;
         }
@@ -667,7 +686,7 @@ int main(int argc, char *argv[]) {
         }
 
         /* Initialize registers - only for fresh boot, not restore */
-        if (!restore_path) {
+        if (!restore_path && !migrate_restore_path) {
             struct kvm_sregs sregs;
             struct kvm_regs regs;
 
@@ -725,6 +744,13 @@ int main(int argc, char *argv[]) {
             return 1;
     }
 
+    /* Step 22: restore from migration file */
+    if (migrate_restore_path) {
+        if (migrate_restore(migrate_restore_path, vcpus[0].fd, vmfd, &uart, &virtio_dev,
+            mem, GUEST_MEM_SIZE) < 0)
+            return 1;
+    }
+
     /* KVM MMU stats - take before snapshot */
     int vm_stats_fd = ioctl(vmfd, KVM_GET_STATS_FD, NULL);
     int vcpu_stats_fd = ioctl(vcpus[0].fd, KVM_GET_STATS_FD, NULL);
@@ -753,9 +779,17 @@ int main(int argc, char *argv[]) {
         pthread_join(threads[i], NULL);
     }
 
-    /* Step 21: save snapshot */
-    snap_save("snapshot.bin", vcpus[0].fd, vmfd, &uart, &virtio_dev,
-        mem, GUEST_MEM_SIZE);
+    /* Step 21: save snapshot only if Ctrl-A s (not migration) */
+    if (!g_migrate_active) {
+        snap_save("snapshot.bin", vcpus[0].fd, vmfd, &uart, &virtio_dev,
+            mem, GUEST_MEM_SIZE);
+    }
+
+    /* Step 22: complete migration (stop-and-copy) if active */
+    if (g_migrate_active) {
+        migrate_stop_and_copy(&g_migrate_ctx, vcpus[0].fd, vmfd,
+            &uart, &virtio_dev, mem, GUEST_MEM_SIZE);
+    }
 
     print_exit_stats();
 

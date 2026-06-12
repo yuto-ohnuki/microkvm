@@ -7,3 +7,4 @@ initramfs.gz
 initramfs/
 init
 snapshot.bin
+migration.bin
