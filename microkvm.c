@@ -6,6 +6,8 @@
 #include <unistd.h>     /* close */
 #include <pthread.h>    /* threads */
 #include <termios.h>    /* tcsetattr, raw terminal mode */
+#include <signal.h>     /* signal handling */
+#include <time.h>       /* clock_gettime for latency measurement */
 #include <sys/ioctl.h>  /* ioctl */
 #include <sys/mman.h>   /* mmap, munmap */
 #include <sys/stat.h>   /* fstat */
@@ -22,6 +24,102 @@
 #define CMDLINE_ADDR     0x20000
 #define KERNEL_ADDR      0x100000
 #define CMDLINE          "console=ttyS0 earlyprintk=serial virtio_mmio.device=0x200@0xd0000000:5"
+
+/* Latency measurement */
+struct latency_stats {
+    uint64_t count;
+    uint64_t total_ns;
+    uint64_t min_ns;
+    uint64_t max_ns;
+};
+
+static struct latency_stats tx_lat;
+static struct latency_stats irq_lat;
+
+static inline uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+static inline void lat_record(struct latency_stats *s, uint64_t ns) {
+    s->count++;
+    s->total_ns += ns;
+    if (ns < s->min_ns) s->min_ns = ns;
+    if (ns > s->max_ns) s->max_ns = ns;
+}
+
+static void lat_init(struct latency_stats *s) {
+    s->count = 0;
+    s->total_ns = 0;
+    s->min_ns = UINT64_MAX;
+    s->max_ns = 0;
+}
+
+/* Runtime flags */
+static int use_ioeventfd = 0;  /* 0=Step15 style, 1=Step17 style */
+static int use_irqfd = 0;     /* 0=Step16 style, 1=Step18 style */
+
+static volatile sig_atomic_t stop_requested = 0;
+
+static void sigint_handler(int sig) {
+    (void)sig;
+    stop_requested = 1;
+}
+
+/* Exit stats counters */
+static uint64_t mmio_exit_count = 0;
+static uint64_t ioeventfd_kick_count = 0;
+static uint64_t irqfd_write_count = 0;
+static uint64_t ioctl_irq_count = 0;
+static uint64_t queue_notify_rx_mmio_count = 0;
+static uint64_t queue_notify_tx_mmio_count = 0;
+
+static void print_exit_stats(void) {
+    fprintf(stderr, "\n==== microkvm exit & latency report ====\n");
+    fprintf(stderr, "Mode: ioeventfd=%s, irqfd=%s\n",
+            use_ioeventfd ? "ON" : "OFF",
+            use_irqfd ? "ON" : "OFF");
+    fprintf(stderr, "\n--- Exit counts ---\n");
+    fprintf(stderr, "MMIO exits total:           %llu\n", (unsigned long long)mmio_exit_count);
+    fprintf(stderr, "QueueNotify MMIO exits:\n");
+    fprintf(stderr, "  RX queue 0:               %llu\n", (unsigned long long)queue_notify_rx_mmio_count);
+    fprintf(stderr, "  TX queue 1:               %llu\n", (unsigned long long)queue_notify_tx_mmio_count);
+    fprintf(stderr, "ioeventfd TX kicks:         %llu\n", (unsigned long long)ioeventfd_kick_count);
+    fprintf(stderr, "IRQ inject (ioctl):         %llu\n", (unsigned long long)ioctl_irq_count);
+    fprintf(stderr, "IRQ inject (irqfd):         %llu\n", (unsigned long long)irqfd_write_count);
+
+    fprintf(stderr, "\n--- TX processing latency ---\n");
+    if (tx_lat.count > 0) {
+        fprintf(stderr, "  Method:   %s\n", use_ioeventfd ? "ioeventfd thread" : "MMIO exit handler");
+        fprintf(stderr, "  Count:    %llu\n", (unsigned long long)tx_lat.count);
+        fprintf(stderr, "  Avg:      %llu ns (%.2f μs)\n",
+                (unsigned long long)(tx_lat.total_ns / tx_lat.count),
+                (double)(tx_lat.total_ns / tx_lat.count) / 1000.0);
+        fprintf(stderr, "  Min:      %llu ns (%.2f μs)\n",
+                (unsigned long long)tx_lat.min_ns, (double)tx_lat.min_ns / 1000.0);
+        fprintf(stderr, "  Max:      %llu ns (%.2f μs)\n",
+                (unsigned long long)tx_lat.max_ns, (double)tx_lat.max_ns / 1000.0);
+    } else {
+        fprintf(stderr, "  (no TX data)\n");
+    }
+
+    fprintf(stderr, "\n--- IRQ injection latency ---\n");
+    if (irq_lat.count > 0) {
+        fprintf(stderr, "  Method:   %s\n", use_irqfd ? "irqfd (write)" : "ioctl (KVM_IRQ_LINE x2)");
+        fprintf(stderr, "  Count:    %llu\n", (unsigned long long)irq_lat.count);
+        fprintf(stderr, "  Avg:      %llu ns (%.2f μs)\n",
+                (unsigned long long)(irq_lat.total_ns / irq_lat.count),
+                (double)(irq_lat.total_ns / irq_lat.count) / 1000.0);
+        fprintf(stderr, "  Min:      %llu ns (%.2f μs)\n",
+                (unsigned long long)irq_lat.min_ns, (double)irq_lat.min_ns / 1000.0);
+        fprintf(stderr, "  Max:      %llu ns (%.2f μs)\n",
+                (unsigned long long)irq_lat.max_ns, (double)irq_lat.max_ns / 1000.0);
+    } else {
+        fprintf(stderr, "  (no IRQ data)\n");
+    }
+    fprintf(stderr, "========================================\n");
+}
 
 static int load_bzimage(const char *path, void *mem) {
     int fd = open(path, O_RDONLY);
@@ -110,7 +208,11 @@ static void *txkick_thread(void *arg) {
     (void)arg;
     uint64_t val;
     while (read(txkick_fd, &val, sizeof(val)) == sizeof(val)) {
+        ioeventfd_kick_count++;
+        uint64_t t1 = now_ns();
         virtio_console_tx(&virtio_dev, virtio_dev.ram, virtio_dev.ram_size);
+        uint64_t t2 = now_ns();
+        lat_record(&tx_lat, t2 - t1);
     }
     return NULL;
 }
@@ -128,6 +230,8 @@ static void *vcpu_thread(void *arg) {
     struct kvm_run *run = vcpu->run;
 
     for (;;) {
+        if (stop_requested)
+            break;
         if (ioctl(vcpu->fd, KVM_RUN, NULL) < 0) {
             perror("KVM_RUN");
             return NULL;
@@ -165,10 +269,32 @@ static void *vcpu_thread(void *arg) {
             case KVM_EXIT_HLT:
                 break;
             case KVM_EXIT_MMIO: {
+                mmio_exit_count++;
                 uint64_t addr = run->mmio.phys_addr;
                 if (addr >= VIRTIO_MMIO_BASE &&
                     addr < VIRTIO_MMIO_BASE + VIRTIO_MMIO_SIZE) {
                     uint64_t offset = addr - VIRTIO_MMIO_BASE;
+
+                    /* Track QueueNotify and handle TX in exit handler if no ioeventfd */
+                    if (addr == VIRTIO_MMIO_BASE + VIRTIO_MMIO_QUEUE_NOTIFY &&
+                        run->mmio.is_write) {
+                        uint32_t nval = 0;
+                        memcpy(&nval, run->mmio.data, run->mmio.len);
+                        if (nval == 0)
+                            queue_notify_rx_mmio_count++;
+                        else if (nval == 1) {
+                            queue_notify_tx_mmio_count++;
+
+                            /* TX processing in exit handler */
+                            if (!use_ioeventfd) {
+                                uint64_t t1 = now_ns();
+                                virtio_console_tx(&virtio_dev, virtio_dev.ram, virtio_dev.ram_size);
+                                uint64_t t2 = now_ns();
+                                lat_record(&tx_lat, t2 - t1);
+                            }
+                        }
+                    }
+
                     if (run->mmio.is_write) {
                         uint32_t val = 0;
                         memcpy(&val, run->mmio.data, run->mmio.len);
@@ -185,6 +311,7 @@ static void *vcpu_thread(void *arg) {
                 return NULL;
         }
     }
+    return NULL;
 }
 
 /* Terminal and stdin handling */
@@ -234,9 +361,20 @@ static void *stdin_thread(void *arg) {
 
         if (virtio_mode) {
             if (virtio_console_rx(&virtio_dev, &c, 1) == 0) {
-                /* Signal IRQ5 via irqfd (no ioctl needed) */
-                uint64_t val = 1;
-                write(irq5_fd, &val, sizeof(val));
+                uint64_t t1 = now_ns();
+                if (use_irqfd) {
+                    uint64_t val = 1;
+                    write(irq5_fd, &val, sizeof(val));
+                    irqfd_write_count++;
+                } else {
+                    struct kvm_irq_level irq = { .irq = 5, .level = 1 };
+                    ioctl(g_vmfd, KVM_IRQ_LINE, &irq);
+                    irq.level = 0;
+                    ioctl(g_vmfd, KVM_IRQ_LINE, &irq);
+                    ioctl_irq_count++;
+                }
+                uint64_t t2 = now_ns();
+                lat_record(&irq_lat, t2 - t1);
             }
         } else {
             uart_rx(&uart, c, g_vmfd);
@@ -247,6 +385,14 @@ static void *stdin_thread(void *arg) {
 
 int main(void) {
     setbuf(stdout, NULL);
+    signal(SIGINT, sigint_handler);
+
+    /* Parse runtime flags from environment */
+    use_ioeventfd = (getenv("USE_IOEVENTFD") != NULL);
+    use_irqfd = (getenv("USE_IRQFD") != NULL);
+
+    lat_init(&tx_lat);
+    lat_init(&irq_lat);
 
     int kvmfd, vmfd;
     int    mmap_size;
@@ -279,16 +425,18 @@ int main(void) {
     }
 
     /* Register ioeventfd: when guest writes 1 to 0xD0000050, KVM signals txkick_fd */
-    struct kvm_ioeventfd ioeventfd = {
-        .addr = VIRTIO_MMIO_BASE + VIRTIO_MMIO_QUEUE_NOTIFY,
-        .len = 4,
-        .datamatch = 1,  /* only trigger for transmitq (value==1) */
-        .fd = txkick_fd,
-        .flags = KVM_IOEVENTFD_FLAG_DATAMATCH,
-    };
-    if (ioctl(vmfd, KVM_IOEVENTFD, &ioeventfd) < 0) {
-        perror("KVM_IOEVENTFD");
-        return 1;
+    if (use_ioeventfd) {
+        struct kvm_ioeventfd ioeventfd = {
+            .addr = VIRTIO_MMIO_BASE + VIRTIO_MMIO_QUEUE_NOTIFY,
+            .len = 4,
+            .datamatch = 1,  /* only trigger for transmitq (value==1) */
+            .fd = txkick_fd,
+            .flags = KVM_IOEVENTFD_FLAG_DATAMATCH,
+        };
+        if (ioctl(vmfd, KVM_IOEVENTFD, &ioeventfd) < 0) {
+            perror("KVM_IOEVENTFD");
+            return 1;
+        }
     }
 
     /* Create irqfd: writing to this fd injects IRQ5 into guest */
@@ -338,14 +486,16 @@ int main(void) {
         return 1;
     }
 
-    struct kvm_irqfd irqfd = {
-        .fd = irq5_fd,
-        .gsi = 5,  /* IRQ5 = virtio-mmio interrupt line */
-        .flags = 0,
-    };
-    if (ioctl(vmfd, KVM_IRQFD, &irqfd) < 0) {
-        perror("KVM_IRQFD");
-        return 1;
+    if (use_irqfd) {
+        struct kvm_irqfd irqfd = {
+            .fd = irq5_fd,
+            .gsi = 5,  /* IRQ5 = virtio-mmio interrupt line */
+            .flags = 0,
+        };
+        if (ioctl(vmfd, KVM_IRQFD, &irqfd) < 0) {
+            perror("KVM_IRQFD");
+            return 1;
+        }
     }
 
     /* Allocate guest memory */
@@ -503,13 +653,15 @@ int main(void) {
 
     /* Run */
     set_raw_terminal();
-    printf("Starting guest with %d vCPUs...\n", NUM_VCPUS);
+    fprintf(stderr, "Starting guest [ioeventfd=%s, irqfd=%s]...\n",
+        use_ioeventfd ? "ON" : "OFF", use_irqfd ? "ON" : "OFF");
 
     pthread_t stdin_tid;
     pthread_create(&stdin_tid, NULL, stdin_thread, NULL);
 
     pthread_t txkick_tid;
-    pthread_create(&txkick_tid, NULL, txkick_thread, NULL);
+    if (use_ioeventfd)
+        pthread_create(&txkick_tid, NULL, txkick_thread, NULL);
 
     for (int i = 0; i < NUM_VCPUS; i++) {
         pthread_create(&threads[i], NULL, vcpu_thread, &vcpus[i]);
@@ -517,6 +669,8 @@ int main(void) {
     for (int i = 0; i < NUM_VCPUS; i++) {
         pthread_join(threads[i], NULL);
     }
+
+    print_exit_stats();
 
     /* Cleanup*/
     for (int i = 0; i < NUM_VCPUS; i++) {
