@@ -14,6 +14,7 @@
 #include <sys/eventfd.h> /* eventfd for ioeventfd/irqfd */
 #include <linux/kvm.h>  /* KVM_* constants */
 #include "uart.h"
+#include "kvm_stats.h"
 #include "virtio_mmio.h"
 
 #define MSR_CUSTOM 0x4B564D00
@@ -651,6 +652,15 @@ int main(void) {
         }
     }
 
+    /* KVM MMU stats - take before snapshot */
+    int vm_stats_fd = ioctl(vmfd, KVM_GET_STATS_FD, NULL);
+    int vcpu_stats_fd = ioctl(vcpus[0].fd, KVM_GET_STATS_FD, NULL);
+    struct kvm_stats_reading vm_before = {0}, vcpu_before = {0};
+    if (vm_stats_fd >= 0)
+        kvm_stats_capture(vm_stats_fd, &vm_before);
+    if (vcpu_stats_fd >= 0)
+        kvm_stats_capture(vcpu_stats_fd, &vcpu_before);
+
     /* Run */
     set_raw_terminal();
     fprintf(stderr, "Starting guest [ioeventfd=%s, irqfd=%s]...\n",
@@ -671,6 +681,19 @@ int main(void) {
     }
 
     print_exit_stats();
+
+    /* KVM MMU stats - take after snapshot and print delta */
+    struct kvm_stats_reading vm_after = {0}, vcpu_after = {0};
+    if (vm_stats_fd >= 0) {
+        kvm_stats_capture(vm_stats_fd, &vm_after);
+        kvm_stats_print_delta("KVM VM stats (boot delta)", &vm_before, &vm_after);
+        close(vm_stats_fd);
+    }
+    if (vcpu_stats_fd >= 0) {
+        kvm_stats_capture(vcpu_stats_fd, &vcpu_after);
+        kvm_stats_print_delta("KVM vCPU 0 stats (boot delta)", &vcpu_before, &vcpu_after);
+        close(vcpu_stats_fd);
+    }
 
     /* Cleanup*/
     for (int i = 0; i < NUM_VCPUS; i++) {
