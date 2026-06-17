@@ -1,5 +1,6 @@
 #include <stdio.h>          /* printf, perror */
 #include <string.h>         /* memset, memcpy */
+#include <stdint.h>         /* uint64_t */
 #include <fcntl.h>          /* open */
 #include <unistd.h>         /* close */
 #include <sys/ioctl.h>      /* ioctl */
@@ -50,6 +51,15 @@ int main(void) {
         return 1;
     }
 
+    /* Setup page tables for long mode (identity map, first 2 MB) */
+    uint64_t *pml4 = (uint64_t *)((char *)mem + 0x70000);
+    uint64_t *pdpt = (uint64_t *)((char *)mem + 0x71000);
+    uint64_t *pd   = (uint64_t *)((char *)mem + 0x72000);
+
+    pml4[0] = 0x71000 | 0x3;    /* present + writable, points to PDPT */
+    pdpt[0] = 0x72000 | 0x3;    /* present + writable, points to PD */
+    pd[0]   = 0x0     | 0x83;   /* present + writable + huge (2MB page at 0x0) */
+
     /* Load guest binary */
     if (load_guest("guest.bin", mem) < 0) {
         return 1;
@@ -83,6 +93,7 @@ int main(void) {
     }
     sregs.cs.base = 0;
     sregs.cs.selector = 0;
+    sregs.efer |= (1 << 8);
     if (ioctl(vcpufd, KVM_SET_SREGS, &sregs) < 0) {
         perror("KVM_SET_SREGS");
         return 1;
