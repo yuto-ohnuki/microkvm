@@ -6,16 +6,7 @@
 #include <sys/mman.h>       /* mmap, munmap */
 #include <linux/kvm.h>      /* KVM_* constants */
 #include "microkvm.h"
-
-static const unsigned char guest_code[] = {
-    0xB0, 'H',      /* mov al, 'H' */
-    0xE6, 0x10,     /* out 0x10, al */
-    0xB0, 'i',      /* mov al, 'i' */
-    0xE6, 0x10,     /* out 0x10, al */
-    0xB0, '\n',     /* mov al, '\n' */
-    0xE6, 0x10,     /* out 0x10, al */
-    0xf4            /* hlt */
-};
+#include "boot.h"
 
 int main(void) {
     int     kvmfd, vmfd, vcpufd;
@@ -60,7 +51,9 @@ int main(void) {
     }
 
     /* Load guest binary */
-    memcpy(mem, guest_code, sizeof(guest_code));
+    if (load_guest("guest.bin", mem) < 0) {
+        return 1;
+    }
 
     /* Create vcpu */
     vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, 0);
