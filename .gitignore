@@ -1,0 +1,16 @@
+microkvm
+guest.o
+guest.bin
+guest.elf
+bzImage
+initramfs.gz
+initramfs/
+init
+snapshot.bin
+migration.bin
+driver/*.o
+driver/*.ko
+driver/*.mod*
+driver/Module.symvers
+driver/modules.order
+driver/.*
