@@ -49,11 +49,19 @@ protected_mode:
     ljmpl *far_ptr
 
 long_mode:
+    /* PIO: confirm long mode entry */
     .byte 0xB0, 'L'      /* mov al, 'L' */
     .byte 0xE6, 0x10     /* out 0x10, al */
     .byte 0xB0, '\n'     /* mov al, '\n' */
     .byte 0xE6, 0x10     /* out 0x10, al */
-    .byte 0xF4           /* hlt */
+
+    /* MMIO write: store to 0xD0000 → EPT violation → KVM_EXIT_MMIO */
+    .byte 0x48, 0xC7, 0xC3, 0x00, 0x00, 0x0D, 0x00  /* mov rbx, 0xD0000 */
+    .byte 0xB0, 'M'                                 /* mov al, 'M' */
+    .byte 0x88, 0x03                                /* mov [rbx], al */
+    .byte 0xB0, '\n'                                /* mov al, '\n' */
+    .byte 0x88, 0x03                                /* mov [rbx], al */
+    .byte 0xF4                                      /* hlt */
 
 /* ============ Data ============ */
 
