@@ -146,3 +146,12 @@ idt_desc:
     .word idt_desc - idt - 1         /* limit */
     .long idt                        /* base_low (fits in 32 bits) */
     .long 0                          /* base_high = 0 */
+
+/* === vCPU 1 entry point (long mode) === */
+.org 0x1100
+vcpu1_entry:
+    .byte 0x48, 0xC7, 0xC3, 0x00, 0x00, 0x0D, 0x00     /* mov rbx, 0xD0000 */
+    .byte 0x8A, 0x03                                   /* mov al, [rbx] */
+    .byte 0x04, 0x30                                   /* add al, '0' */
+    .byte 0xE6, 0x10                                   /* out 0x10, al */
+    .byte 0xF4                                         /* hlt */
