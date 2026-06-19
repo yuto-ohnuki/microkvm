@@ -19,6 +19,7 @@ int main(void) {
     struct  kvm_run      *run;
     int     mmap_size;
     void    *mem;
+    int     irq_injected = 0;
 
     /* Open /dev/kvm */
     kvmfd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
@@ -131,8 +132,22 @@ int main(void) {
         }
         switch (run->exit_reason) {
         case KVM_EXIT_HLT:
-            printf("Guest halted.\n");
-            goto done;
+            if (!irq_injected) {
+                /* First HLT: inject IRQ vector 32 to wake guest */
+                struct kvm_interrupt irq = {
+                    .irq = 32
+                };
+                if (ioctl(vcpufd, KVM_INTERRUPT, &irq) < 0) {
+                    perror("KVM_INTERRUPT");
+                    return 1;
+                }
+                irq_injected = 1;
+            } else {
+                /* Second HLT: guest is done */
+                printf("Guest halted.\n");
+                goto done;
+            }
+            break;
         case KVM_EXIT_IO:
             if (run->io.port == PIO_PORT && run->io.direction == KVM_EXIT_IO_OUT) {
                 char c = *(char *)((char *)run + run->io.data_offset);

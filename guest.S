@@ -49,6 +49,9 @@ protected_mode:
     ljmpl *far_ptr
 
 long_mode:
+    /* Set up stack (required for interrupt handler to push RIP/CS/RFLAGS) */
+    .byte 0x48, 0xC7, 0xC4, 0x00, 0x00, 0x06, 0x00  /* mov rsp, 0x60000 */
+
     /* PIO: confirm long mode entry */
     .byte 0xB0, 'L'      /* mov al, 'L' */
     .byte 0xE6, 0x10     /* out 0x10, al */
@@ -69,7 +72,15 @@ long_mode:
     .byte 0xB0, '\n'                                /* mov al, '\n' */
     .byte 0xE6, 0x10                                /* out 0x10, al */
 
-    /* HLT */
+    /* Set up IDT and wait for interrupt */
+    .byte 0x48, 0xC7, 0xC1                          /* mov rcx, imm32 */
+    .long idt_desc                                  /* absolute address of idt_desc */
+    .byte 0x0F, 0x01, 0x19                          /* lidt [rcx] */
+
+    .byte 0xFB                                      /* sti */
+    .byte 0xF4                                      /* hlt - wait for interrupt */
+
+    /* After iretq returns here */
     .byte 0xF4                                      /* hlt */
 
 /* ============ Data ============ */
@@ -78,6 +89,8 @@ long_mode:
 far_ptr:
     .long long_mode      /* offset */
     .word 0x18           /* selector: GDT[3] = 64-bit code */
+
+/* === GDT === */
 
 .align 8
 gdt:
@@ -90,3 +103,31 @@ gdt:
 gdt_desc:
     .word gdt_desc - gdt - 1         /* limit: size of GDT - 1 */
     .long gdt                        /* base: address of GDT */
+
+/* === Interrupt handler (vector 32) === */
+.align 16
+irq_handler:
+    .byte 0xB0, 'I'                  /* mov al, 'I' */
+    .byte 0xE6, 0x10                 /* out 0x10, al */
+    .byte 0xB0, '\n'                 /* mov al, '\n' */
+    .byte 0xE6, 0x10                 /* out 0x10, al */
+    .byte 0x48, 0xCF                 /* iretq */
+
+/* === IDT === */
+.align 16
+idt:
+    .fill 64, 8, 0                   /* vectors 0-31: null */
+
+    /* Vector 32: interrupt gate → irq_handler */
+    .word irq_handler                /* offset_low (address fits in 16 bits) */
+    .word 0x18                       /* selector: 64-bit code */
+    .byte 0x00                       /* IST = 0 */
+    .byte 0x8E                       /* present, DPL=0, interrupt gate */
+    .word 0x0000                     /* offset_mid = 0 (handler < 64KB) */
+    .long 0x00000000                 /* offset_high = 0 */
+    .long 0x00000000                 /* reserved */
+
+idt_desc:
+    .word idt_desc - idt - 1         /* limit */
+    .long idt                        /* base_low (fits in 32 bits) */
+    .long 0                          /* base_high = 0 */
