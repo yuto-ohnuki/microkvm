@@ -72,6 +72,21 @@ long_mode:
     .byte 0xB0, '\n'                                /* mov al, '\n' */
     .byte 0xE6, 0x10                                /* out 0x10, al */
 
+    /* MSR write: wrmsr(0x4B564D00, 0x42) */
+    .byte 0xB9, 0x00, 0x4D, 0x56, 0x4B              /* mov ecx, 0x4B564D00 */
+    .byte 0x31, 0xD2                                /* xor edx, edx */
+    .byte 0xB8, 0x42, 0x00, 0x00, 0x00              /* mov eax, 0x42 */
+    .byte 0x0F, 0x30                                /* wrmsr */
+
+    /* MSR read:  rdmsr(0x4B564D00) */
+    .byte 0x0F, 0x32                                /* rdmsr */
+
+    /* Convert low byte to ASCII and output via PIO */
+    .byte 0x04, 0x30                                /* add al, '0' (0x42 → 0x72 = 'r') */
+    .byte 0xE6, 0x10                                /* out 0x10, al */
+    .byte 0xB0, '\n'                                /* mov al, '\n' */
+    .byte 0xE6, 0x10                                /* out 0x10, al */
+
     /* Set up IDT and wait for interrupt */
     .byte 0x48, 0xC7, 0xC1                          /* mov rcx, imm32 */
     .long idt_desc                                  /* absolute address of idt_desc */
