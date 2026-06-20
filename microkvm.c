@@ -39,6 +39,23 @@ static void set_raw_terminal(void) {
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
 }
 
+/* Read host stdin and deliver to guest via UART RX */
+static void *stdin_thread(void *arg) {
+    (void)arg;
+    uint8_t c;
+    while (read(STDIN_FILENO, &c, 1) == 1) {
+        if (c == 0x1b) {
+            while (read(STDIN_FILENO, &c, 1) == 1) {
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+                    break;
+            }
+            continue;
+        }
+        uart_rx(&uart, c, g_vmfd);
+    }
+    return NULL;
+}
+
 /* Per-vCPU state */
 struct vcpu {
     int fd;
@@ -316,8 +333,12 @@ int main(void) {
         }
     }
 
-    /* Run the guest code */
+    /* Run */
     printf("Starting guest...\n");
+
+    pthread_t stdin_tid;
+    pthread_create(&stdin_tid, NULL, stdin_thread, NULL);
+
     for (int i = 0; i < NUM_VCPUS; i++) {
         pthread_create(&threads[i], NULL, vcpu_thread, &vcpus[i]);
     }
