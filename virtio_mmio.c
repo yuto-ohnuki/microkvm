@@ -118,7 +118,7 @@ int virtio_console_rx(struct virtio_mmio_dev *dev, const uint8_t *data, size_t l
  * ram: pointer to the start of guest physical memory (mmap'd region)
  * ram_size: total guest RAM size
  */
-static void virtio_console_tx(struct virtio_mmio_dev *dev,
+void virtio_console_tx(struct virtio_mmio_dev *dev,
     uint8_t *ram, size_t ram_size)
 {
     int qidx = 1;
@@ -274,9 +274,8 @@ void virtio_mmio_write(struct virtio_mmio_dev *dev, uint64_t offset,
         }
         break;
     case VIRTIO_MMIO_QUEUE_NOTIFY:
-        if (value == 1) {   /* transmitq */
-            virtio_console_tx(dev, dev->ram, dev->ram_size);
-        }
+        /* transmitq (value==1) is handled via ioeventfd, no exit reaches here.
+         * receiveq (value==0) still arrives as MMIO exit (no-op for now). */
         break;
     case VIRTIO_MMIO_INTERRUPT_ACK:
         dev->interrupt_status &= ~value;

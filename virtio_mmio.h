@@ -101,4 +101,7 @@ uint32_t virtio_mmio_read(struct virtio_mmio_dev *dev, uint64_t offset, int len)
 /* RX: write data into receiveq and raise interrupt */
 int virtio_console_rx(struct virtio_mmio_dev *dev, const uint8_t *data, size_t len);
 
+/* TX: process transmitq and write payload to stdout */
+void virtio_console_tx(struct virtio_mmio_dev *dev, uint8_t *ram, size_t ram_size);
+
 #endif
