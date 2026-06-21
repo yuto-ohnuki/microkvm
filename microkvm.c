@@ -12,8 +12,9 @@
 #include "microkvm.h"
 #include "boot.h"
 #include "uart.h"
+#include "virtio_mmio.h"
 
-#define CMDLINE "console=ttyS0 earlyprintk=serial rdinit=/init"
+#define CMDLINE "console=ttyS0 earlyprintk=serial rdinit=/init virtio_mmio.device=0x200@0xd0000000:5"
 
 /* Device state */
 static uint64_t msr_store = 0;
@@ -21,6 +22,9 @@ static int g_vmfd;
 
 /* UART */
 static struct uart8250 uart;
+
+/* Virtio-mmio device */
+static struct virtio_mmio_dev virtio_dev;
 
 /* Terminal and stdin handling */
 static struct termios orig_termios;
@@ -89,8 +93,21 @@ static void *vcpu_thread(void *arg) {
             }
             break;
         }
-        case KVM_EXIT_MMIO:
+        case KVM_EXIT_MMIO: {
+            uint64_t addr = run->mmio.phys_addr;
+            if (addr >= VIRTIO_MMIO_BASE && addr < VIRTIO_MMIO_BASE + VIRTIO_MMIO_SIZE) {
+                uint64_t offset = addr - VIRTIO_MMIO_BASE;
+                if (run->mmio.is_write) {
+                    uint32_t val = 0;
+                    memcpy(&val, run->mmio.data, run->mmio.len);
+                    virtio_mmio_write(&virtio_dev, offset, val, run->mmio.len);
+                } else {
+                    uint32_t val = virtio_mmio_read(&virtio_dev, offset, run->mmio.len);
+                    memcpy(run->mmio.data, &val, run->mmio.len);
+                }
+            }
             break;
+        }
         case KVM_EXIT_X86_WRMSR:
             if (run->msr.index == MSR_CUSTOM) {
                 msr_store = run->msr.data;
@@ -141,6 +158,9 @@ int main(void) {
 
     /* Create UART */
     uart_init(&uart);
+
+    /* Initialize virtio-mmio device */
+    virtio_mmio_init(&virtio_dev);
 
     /* Enable userspace MSR handling */
     struct kvm_enable_cap msr_cap = {
