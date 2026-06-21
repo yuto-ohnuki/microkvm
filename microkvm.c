@@ -30,6 +30,9 @@ static struct virtio_mmio_dev virtio_dev;
 /* Eventfd for transmitq kick */
 static int txkick_fd;
 
+/* eventfd for IRQ5 injection */
+static int irq5_fd;
+
 static void *txkick_thread(void *arg) {
     (void)arg;
     uint64_t val;
@@ -95,14 +98,9 @@ static void *stdin_thread(void *arg) {
         /* Deliver character to guest via selected channel */
         if (virtio_mode) {
             if (virtio_console_rx(&virtio_dev, &c, 1) == 0) {
-                /* Inject IRQ 5 (edge-triggered: assert then deassert) */
-                struct kvm_irq_level irq = {
-                    .irq = 5,
-                    .level = 1
-                };
-                ioctl(g_vmfd, KVM_IRQ_LINE, &irq);
-                irq.level = 0;
-                ioctl(g_vmfd, KVM_IRQ_LINE, &irq);
+                /* Signal IRQ5 via irqfd (no ioctl needed) */
+                uint64_t val = 1;
+                write(irq5_fd, &val, sizeof(val));
             }
         } else {
             uart_rx(&uart, c, g_vmfd);
@@ -233,6 +231,13 @@ int main(void) {
         return 1;
     }
 
+    /* Create irqfd: writing to this fd injects IRQ5 into guest */
+    irq5_fd = eventfd(0, EFD_CLOEXEC);
+    if (irq5_fd < 0) {
+        perror("eventfd irq5");
+        return 1;
+    }
+
     /* Enable userspace MSR handling */
     struct kvm_enable_cap msr_cap = {
         .cap = KVM_CAP_X86_USER_SPACE_MSR,
@@ -271,6 +276,18 @@ int main(void) {
     };
     if (ioctl(vmfd, KVM_CREATE_PIT2, &pit) < 0) {
         perror("KVM_CREATE_PIT2");
+        return 1;
+    }
+
+    /* Register irqfd: writing to irq5_fd injects IRQ5 into guest
+     * without any ioctl — KVM handles it entirely in kernel space */
+    struct kvm_irqfd irqfd = {
+        .fd = irq5_fd,
+        .gsi = 5,   /* IRQ5 = virtio-mmio interrupt line */
+        .flags = 0,
+    };
+    if (ioctl(vmfd, KVM_IRQFD, &irqfd) < 0) {
+        perror("KVM_IRQFD");
         return 1;
     }
 
