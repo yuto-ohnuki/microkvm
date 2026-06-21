@@ -28,6 +28,12 @@ uint32_t virtio_mmio_read(struct virtio_mmio_dev *dev, uint64_t offset, int len)
     case VIRTIO_MMIO_VENDOR_ID:
         val = VIRTIO_VENDOR_MKVM;
         break;
+    case VIRTIO_MMIO_HOST_FEATURES:
+        val = 0;
+        break;
+    case VIRTIO_MMIO_QUEUE_NUM_MAX:
+        val = 0;
+        break;
     default:
         break;
     }
@@ -49,6 +55,20 @@ void virtio_mmio_write(struct virtio_mmio_dev *dev, uint64_t offset,
         dev->status = value;
         if (value == 0)
             fprintf(stderr, "[virtio-mmio] device reset\n");
+        break;
+    case VIRTIO_MMIO_HOST_FEATURES_SEL:
+        dev->host_features_sel = value;
+        break;
+    case VIRTIO_MMIO_GUEST_FEATURES_SEL:
+        break;
+    case VIRTIO_MMIO_GUEST_FEATURES:
+        dev->guest_features = value;
+        break;
+    case VIRTIO_MMIO_GUEST_PAGE_SIZE:
+        dev->guest_page_size = value;
+        break;
+    case VIRTIO_MMIO_QUEUE_SEL:
+        dev->queue_sel = value;
         break;
     default:
         break;
