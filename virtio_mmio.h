@@ -23,6 +23,17 @@
 #define VIRTIO_MMIO_QUEUE_SEL           0x030
 #define VIRTIO_MMIO_QUEUE_NUM_MAX       0x034
 
+/* Virtqueue setup */
+#define VIRTIO_MMIO_QUEUE_NUM           0x038
+#define VIRTIO_MMIO_QUEUE_ALIGN         0x03C
+#define VIRTIO_MMIO_QUEUE_PFN           0x040
+#define VIRTIO_MMIO_QUEUE_NOTIFY        0x050
+#define VIRTIO_MMIO_INTERRUPT_STATUS    0x060
+#define VIRTIO_MMIO_INTERRUPT_ACK       0x064
+
+#define VIRTQ_NUM_QUEUES 2      /* receiveq (0) + transmitq (1) */
+#define VIRTQ_MAX_SIZE   128    /* max descriptors per queue */
+
 /* Magic: "virt" in little-endian */
 #define VIRTIO_MMIO_MAGIC  0x74726976
 
@@ -32,6 +43,13 @@
 /* Our vendor ID: "MKVM" in little-endian */
 #define VIRTIO_VENDOR_MKVM  0x4D4B564D
 
+/* Per-virtqueue configuration (set by guest during queue setup) */
+struct virtqueue_state {
+    uint32_t num;
+    uint32_t align;
+    uint32_t pfn;
+};
+
 /* Virtio-mmio device state */
 struct virtio_mmio_dev {
     uint32_t status;
@@ -39,6 +57,7 @@ struct virtio_mmio_dev {
     uint32_t guest_features;
     uint32_t guest_page_size;
     uint32_t queue_sel;
+    struct virtqueue_state vqs[VIRTQ_NUM_QUEUES];
 };
 
 void virtio_mmio_init(struct virtio_mmio_dev *dev);
