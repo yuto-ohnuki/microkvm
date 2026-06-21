@@ -244,6 +244,10 @@ int main(void) {
     if (load_initramfs("initramfs.gz", mem, &initrd_size) < 0)
         fprintf(stderr, "Warning: no initramfs.gz found\n");
 
+    /* Give virtio device access to guest memory */
+    virtio_dev.ram = (uint8_t *)mem;
+    virtio_dev.ram_size = GUEST_MEM_SIZE;
+
     /* Get vCPU mmap size */
     mmap_size = ioctl(kvmfd, KVM_GET_VCPU_MMAP_SIZE, NULL);
 
