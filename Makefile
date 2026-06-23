@@ -1,7 +1,7 @@
 all: microkvm
 
-microkvm: microkvm.c boot.c uart.c virtio_mmio.c
-	gcc -O2 -Wall -o microkvm microkvm.c boot.c uart.c virtio_mmio.c -lpthread
+microkvm: microkvm.c boot.c uart.c virtio_mmio.c kvm_stats.c
+	gcc -O2 -Wall -o microkvm microkvm.c boot.c uart.c virtio_mmio.c kvm_stats.c -lpthread
 
 guest.bin: guest.S
 	as --32 -o guest.o guest.S
