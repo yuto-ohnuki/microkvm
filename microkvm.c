@@ -60,12 +60,6 @@ static void lat_init(struct latency_stats *s) {
     s->max_ns = 0;
 }
 
-static inline uint64_t now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-}
-
 static inline void lat_record(struct latency_stats *s, uint64_t ns) {
     s->count++;
     s->total_ns += ns;
@@ -133,6 +127,10 @@ static void print_exit_stats(void) {
 /* Device state */
 static uint64_t msr_store = 0;
 static int g_vmfd;
+
+/* Live migration status */
+static struct migrate_context g_migrate_ctx;
+static int g_migrate_active = 0;
 
 /* UART */
 static struct uart8250 uart;
@@ -271,6 +269,15 @@ static void *stdin_thread(void *arg) {
             }
             if (c == 's') {
                 fprintf(stderr, "\n[monitor] saving snapshot...\n");
+                stop_requested = 1;
+                continue;
+            }
+            if (c == 'm') {
+                fprintf(stderr, "\n[monitor] starting live migration...\n");
+                if (migrate_precopy("migration.bin", g_vmfd, virtio_dev.ram,
+                    GUEST_MEM_SIZE, &g_migrate_ctx) == 0) {
+                    g_migrate_active = 1;
+                }
                 stop_requested = 1;
                 continue;
             }
@@ -428,6 +435,11 @@ int main(int argc, char *argv[]) {
     if (argc > 2 && strcmp(argv[1], "--restore") == 0)
         restore_path = argv[2];
 
+    /* Check for --restore-migration mode */
+    char *migrate_restore_path = NULL;
+    if (argc > 2 && strcmp(argv[1], "--restore-migration") == 0)
+        migrate_restore_path = argv[2];
+
     /* Parse runtime flags from environment:
      *   USE_IOEVENTFD=1 ./microkvm  → Step 17 style TX kick
      *   USE_IRQFD=1 ./microkvm      → Step 18 style IRQ injection */
@@ -581,7 +593,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Load bzImage*/
-    if (!restore_path) {
+    if (!restore_path && !migrate_restore_path) {
         if (load_bzimage("bzImage", mem, CMDLINE) < 0) {
             return 1;
         }
@@ -655,7 +667,7 @@ int main(int argc, char *argv[]) {
 
         /* Initialize registers: 32-bit protected mode (Linux Boot Protocol)
          * Kernel's startup_32 expects flat segments with full 4GB access */
-        if (!restore_path) {
+        if (!restore_path && !migrate_restore_path) {
             struct kvm_sregs    sregs;
             struct kvm_regs     regs;
 
@@ -714,6 +726,13 @@ int main(int argc, char *argv[]) {
             return 1;
     }
 
+    /* Restore from migration file if --restore-migration was specified */
+    if (migrate_restore_path) {
+        if (migrate_restore(migrate_restore_path, vcpus[0].fd, vmfd, &uart, &virtio_dev,
+            mem, GUEST_MEM_SIZE) < 0)
+            return 1;
+    }
+
     /* KVM MMU stats - take before snapshot */
     int vm_stats_fd = ioctl(vmfd, KVM_GET_STATS_FD, NULL);
     int vcpu_stats_fd = ioctl(vcpus[0].fd, KVM_GET_STATS_FD, NULL);
@@ -743,8 +762,14 @@ int main(int argc, char *argv[]) {
         pthread_join(threads[i], NULL);
     }
 
-    /* Save snapshot, triggered by Ctrl-A + s */
-    snap_save("snapshot.bin", vcpus[0].fd, vmfd, &uart, &virtio_dev, mem, GUEST_MEM_SIZE);
+    /* Save snapshot or complete migration depending on trigger */
+    if (g_migrate_active) {
+        migrate_stop_and_copy(&g_migrate_ctx, vcpus[0].fd, vmfd,
+            &uart, &virtio_dev, mem, GUEST_MEM_SIZE);
+    } else {
+        snap_save("snapshot.bin", vcpus[0].fd, vmfd, &uart, &virtio_dev,
+            mem, GUEST_MEM_SIZE);
+    }
 
     /* Print exit counts and latency stats (benchmark report) */
     print_exit_stats();
