@@ -15,6 +15,7 @@
 #include "microkvm.h"
 #include "boot.h"
 #include "uart.h"
+#include "snapshot.h"
 #include "kvm_stats.h"
 #include "virtio_mmio.h"
 
@@ -268,6 +269,11 @@ static void *stdin_thread(void *arg) {
                 print_dirty_log(g_vmfd, GUEST_MEM_SIZE);
                 continue;
             }
+            if (c == 's') {
+                fprintf(stderr, "\n[monitor] saving snapshot...\n");
+                stop_requested = 1;
+                continue;
+            }
             continue;
         }
 
@@ -397,6 +403,10 @@ static void *vcpu_thread(void *arg) {
                 run->msr.error = 1;
             }
             break;
+        case KVM_EXIT_FAIL_ENTRY:
+            fprintf(stderr, "KVM_EXIT_FAIL_ENTRY: hardware_entry_failure_reason=0x%llx\n",
+                (unsigned long long)run->fail_entry.hardware_entry_failure_reason);
+            return NULL;
         default:
             fprintf(stderr, "Unexpected exit reason: %d\n", run->exit_reason);
             return NULL;
@@ -405,13 +415,18 @@ static void *vcpu_thread(void *arg) {
     return NULL;
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
 
     /* Disable stdout buffering so kernel output appears immediately */
     setbuf(stdout, NULL);
 
     /* Ctrl-C stops the VM and prints exit/latency stats */
     signal(SIGINT, sigint_handler);
+
+    /* Check for --restore mode */
+    char *restore_path = NULL;
+    if (argc > 2 && strcmp(argv[1], "--restore") == 0)
+        restore_path = argv[2];
 
     /* Parse runtime flags from environment:
      *   USE_IOEVENTFD=1 ./microkvm  → Step 17 style TX kick
@@ -511,7 +526,7 @@ int main(void) {
     }
 
     struct kvm_pit_config pit = {
-        .flags = 0,
+        .flags = KVM_PIT_SPEAKER_DUMMY,
     };
     if (ioctl(vmfd, KVM_CREATE_PIT2, &pit) < 0) {
         perror("KVM_CREATE_PIT2");
@@ -566,14 +581,16 @@ int main(void) {
     }
 
     /* Load bzImage*/
-    if (load_bzimage("bzImage", mem, CMDLINE) < 0) {
-        return 1;
-    }
+    if (!restore_path) {
+        if (load_bzimage("bzImage", mem, CMDLINE) < 0) {
+            return 1;
+        }
 
-    /* Load initramfs (required for userspace) */
-    uint32_t initrd_size;
-    if (load_initramfs("initramfs.gz", mem, &initrd_size) < 0)
-        fprintf(stderr, "Warning: no initramfs.gz found\n");
+        /* Load initramfs (required for userspace) */
+        uint32_t initrd_size;
+        if (load_initramfs("initramfs.gz", mem, &initrd_size) < 0)
+            fprintf(stderr, "Warning: no initramfs.gz found\n");
+    }
 
     /* Give virtio device access to guest memory */
     virtio_dev.ram = (uint8_t *)mem;
@@ -638,54 +655,63 @@ int main(void) {
 
         /* Initialize registers: 32-bit protected mode (Linux Boot Protocol)
          * Kernel's startup_32 expects flat segments with full 4GB access */
-        struct kvm_sregs    sregs;
-        struct kvm_regs     regs;
+        if (!restore_path) {
+            struct kvm_sregs    sregs;
+            struct kvm_regs     regs;
 
-        if (ioctl(vcpus[i].fd, KVM_GET_SREGS, &sregs) < 0) {
-            perror("KVM_GET_SREGS");
-            return 1;
+            if (ioctl(vcpus[i].fd, KVM_GET_SREGS, &sregs) < 0) {
+                perror("KVM_GET_SREGS");
+                return 1;
+            }
+
+            /* Control registers: protected mode, no paging (kernel enables it) */
+            sregs.cr0 = 0x11;               /* PE | ET */
+
+            /* Code segment: 32-bit, flat, execute/read */
+            sregs.cs.base = 0;
+            sregs.cs.selector = 0x10;
+            sregs.cs.type = 11;             /* execute/read, accessed */
+            sregs.cs.present = 1;
+            sregs.cs.s = 1;
+            sregs.cs.db = 1;                /* 32-bit mode */
+            sregs.cs.g = 1;                 /* 4KB granularity */
+            sregs.cs.limit = 0xFFFFFFFF;    /* 4GB flat */
+
+            /* Data segments: 32-bit, flat, read/write (all identical) */
+            sregs.ds.base = 0;
+            sregs.ds.selector = 0x18;
+            sregs.ds.type = 3;              /* read/write, accessed */
+            sregs.ds.present = 1;
+            sregs.ds.s = 1;
+            sregs.ds.db = 1;
+            sregs.ds.g = 1;
+            sregs.ds.limit = 0xFFFFFFFF;
+            sregs.es = sregs.ds;
+            sregs.fs = sregs.ds;
+            sregs.gs = sregs.ds;
+            sregs.ss = sregs.ds;
+
+            memset(&regs, 0, sizeof(regs));
+            regs.rip = KERNEL_ADDR;         /* kernel entry point (startup_32) */
+            regs.rsi = BOOT_PARAMS_ADDR;    /* boot_params pointer passed in %esi */
+            regs.rflags = 0x2;
+
+            if (ioctl(vcpus[i].fd, KVM_SET_SREGS, &sregs) < 0) {
+                perror("KVM_SET_SREGS");
+                return 1;
+            }
+            if (ioctl(vcpus[i].fd, KVM_SET_REGS, &regs) < 0) {
+                perror("KVM_SET_REGS");
+                return 1;
+            }
         }
+    }
 
-        /* Control registers: protected mode, no paging (kernel enables it) */
-        sregs.cr0 = 0x11;               /* PE | ET */
-
-        /* Code segment: 32-bit, flat, execute/read */
-        sregs.cs.base = 0;
-        sregs.cs.selector = 0x10;
-        sregs.cs.type = 11;             /* execute/read, accessed */
-        sregs.cs.present = 1;
-        sregs.cs.s = 1;
-        sregs.cs.db = 1;                /* 32-bit mode */
-        sregs.cs.g = 1;                 /* 4KB granularity */
-        sregs.cs.limit = 0xFFFFFFFF;    /* 4GB flat */
-
-        /* Data segments: 32-bit, flat, read/write (all identical) */
-        sregs.ds.base = 0;
-        sregs.ds.selector = 0x18;
-        sregs.ds.type = 3;              /* read/write, accessed */
-        sregs.ds.present = 1;
-        sregs.ds.s = 1;
-        sregs.ds.db = 1;
-        sregs.ds.g = 1;
-        sregs.ds.limit = 0xFFFFFFFF;
-        sregs.es = sregs.ds;
-        sregs.fs = sregs.ds;
-        sregs.gs = sregs.ds;
-        sregs.ss = sregs.ds;
-
-        memset(&regs, 0, sizeof(regs));
-        regs.rip = KERNEL_ADDR;         /* kernel entry point (startup_32) */
-        regs.rsi = BOOT_PARAMS_ADDR;    /* boot_params pointer passed in %esi */
-        regs.rflags = 0x2;
-
-        if (ioctl(vcpus[i].fd, KVM_SET_SREGS, &sregs) < 0) {
-            perror("KVM_SET_SREGS");
+    /* Restore VM state if --restore was specified */
+    if (restore_path) {
+        if (snap_restore(restore_path, vcpus[0].fd, vmfd, &uart, &virtio_dev,
+            mem, GUEST_MEM_SIZE) < 0)
             return 1;
-        }
-        if (ioctl(vcpus[i].fd, KVM_SET_REGS, &regs) < 0) {
-            perror("KVM_SET_REGS");
-            return 1;
-        }
     }
 
     /* KVM MMU stats - take before snapshot */
@@ -716,6 +742,9 @@ int main(void) {
     for (int i = 0; i < NUM_VCPUS; i++) {
         pthread_join(threads[i], NULL);
     }
+
+    /* Save snapshot, triggered by Ctrl-A + s */
+    snap_save("snapshot.bin", vcpus[0].fd, vmfd, &uart, &virtio_dev, mem, GUEST_MEM_SIZE);
 
     /* Print exit counts and latency stats (benchmark report) */
     print_exit_stats();
