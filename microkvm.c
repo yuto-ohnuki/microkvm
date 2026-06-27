@@ -141,6 +141,7 @@ static struct virtio_mmio_dev virtio_dev;
 
 /* PCI device */
 static struct pci_device pci_dev;
+static struct pci_device pci_hotplug_dev;   /* device=1, starts absent */
 
 /* Eventfd for transmitq kick */
 static int txkick_fd;
@@ -285,6 +286,13 @@ static void *stdin_thread(void *arg) {
                 stop_requested = 1;
                 continue;
             }
+            if (c == 'h') {
+                pci_hotplug_dev.present = !pci_hotplug_dev.present;
+                fprintf(stderr, "\n[monitor] PCI device 0000:00:01.0 %s\n",
+                    pci_hotplug_dev.present ? "ADDED (run: echo 1 > /sys/bus/pci/rescan)" :
+                    "REMOVED (run: echo 1 > /sys/bus/pci/devices/0000:00:01.0/remove)");
+                continue;
+            }
             continue;
         }
 
@@ -376,15 +384,21 @@ static void *vcpu_thread(void *arg) {
                     uint8_t device = (addr >> 11) & 0x1F;
                     uint8_t func = (addr >> 8) & 0x07;
                     uint8_t offset = (addr & 0xFC) + (port - PCI_CONFIG_DATA_PORT);
+                    struct pci_device *target = NULL;
 
-                    if (bus == 0 && device == 0 && func == 0) {
-                        /* Our device at 00:00.0 */
+                    if (bus == 0 && func == 0) {
+                        if (device == 0)
+                            target = &pci_dev;          /* Our device at 00:00.0 */
+                        else if (device == 1)
+                            target = &pci_hotplug_dev;  /* Our device at 00:01.0 */
+                    }
+                    if (target) {
                         if (run->io.direction == KVM_EXIT_IO_OUT) {
                             uint32_t val = 0;
                             memcpy(&val, data, run->io.size);
-                            pci_config_write(&pci_dev, offset, val, run->io.size);
+                            pci_config_write(target, offset, val, run->io.size);
                         } else {
-                            uint32_t val = pci_config_read(&pci_dev, offset, run->io.size);
+                            uint32_t val = pci_config_read(target, offset, run->io.size);
                             memcpy(data, &val, run->io.size);
                         }
                     } else {
@@ -455,6 +469,19 @@ static void *vcpu_thread(void *arg) {
                             pci_dev_mmio_write(&pci_dev, offset, val);
                         } else {
                             uint32_t val = pci_dev_mmio_read(&pci_dev, offset);
+                            memcpy(run->mmio.data, &val, run->mmio.len);
+                        }
+                    }
+                } else {
+                    uint32_t bar0_hp = pci_bar0_addr(&pci_hotplug_dev);
+                    if (bar0_hp && addr >= bar0_hp && addr < bar0_hp + PCI_BAR0_SIZE) {
+                        uint64_t offset = addr - bar0_hp;
+                        if (run->mmio.is_write) {
+                            uint32_t val = 0;
+                            memcpy(&val, run->mmio.data, run->mmio.len);
+                            pci_dev_mmio_write(&pci_hotplug_dev, offset, val);
+                        } else {
+                            uint32_t val = pci_dev_mmio_read(&pci_hotplug_dev, offset);
                             memcpy(run->mmio.data, &val, run->mmio.len);
                         }
                     }
@@ -546,6 +573,9 @@ int main(int argc, char *argv[]) {
     /* Initialize PCI device */
     pci_init(&pci_dev);
     pci_dev.vmfd = vmfd;    /* needed for KVM_SIGNAL_MSI in doorbell handler */
+    pci_init_hotplug(&pci_hotplug_dev);
+    pci_hotplug_dev.ram_size = GUEST_MEM_SIZE;
+    pci_hotplug_dev.vmfd = vmfd;
 
     /* Create eventfd for transmitq kick (ioeventfd) */
     txkick_fd = eventfd(0, EFD_CLOEXEC);
@@ -683,6 +713,7 @@ int main(int argc, char *argv[]) {
     /* Give PCI device access to guest memory */
     pci_dev.ram = (uint8_t *)mem;
     pci_dev.ram_size = GUEST_MEM_SIZE;
+    pci_hotplug_dev.ram = (uint8_t *)mem;
 
     /* Get vCPU mmap size */
     mmap_size = ioctl(kvmfd, KVM_GET_VCPU_MMAP_SIZE, NULL);

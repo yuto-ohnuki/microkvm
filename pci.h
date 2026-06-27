@@ -72,6 +72,9 @@ struct pci_device {
     /* MSI-X */
     struct msix_entry msix_table[PCI_MSIX_TABLE_ENTRIES];
     int vmfd;                   /* for KVM_SIGNAL_MSI */
+
+    /* hotplug */
+    int present;                /* 0=absent (returns 0xFFFF), 1=present */
 };
 
 void pci_init(struct pci_device *dev);
@@ -84,5 +87,7 @@ void pci_dev_mmio_write(struct pci_device *dev, uint64_t offset, uint32_t value)
 
 uint32_t pci_msix_read(struct pci_device *dev, uint64_t offset);
 void pci_msix_write(struct pci_device *dev, uint64_t offset, uint32_t value);
+
+void pci_init_hotplug(struct pci_device *dev);
 
 #endif /* PCI_H */

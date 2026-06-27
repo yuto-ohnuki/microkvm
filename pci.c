@@ -51,6 +51,20 @@ void pci_init(struct pci_device *dev)
     *(uint32_t *)&dev->config[0x48] = 0x00000C00;
 
     dev->config_address = 0;
+    dev->present = 1;
+}
+
+/* Initialize hotplug PCI device (device=1). Starts absent (present=0) */
+void pci_init_hotplug(struct pci_device *dev)
+{
+    memset(dev, 0, sizeof(*dev));
+    *(uint16_t *)&dev->config[0x00] = 0x1234;
+    *(uint16_t *)&dev->config[0x02] = 0x0002;   /* different device ID */
+    dev->config[0x08] = 0x01;
+    dev->config[0x0B] = 0xFF;
+    dev->config[0x0E] = 0x00;
+    dev->bar0_mask = ~(PCI_BAR0_SIZE - 1);
+    dev->present = 0;   /* starts absent */
 }
 
 /* Extract BAR0 base address (mask out type bits in lower 4 bits) */
@@ -66,6 +80,8 @@ uint32_t pci_bar0_addr(struct pci_device *dev) {
  */
 void pci_config_write(struct pci_device *dev, uint8_t offset, uint32_t value, int len)
 {
+    if (!dev->present)
+        return;
     fprintf(stderr, "[pci] config write offset=0x%02x ← 0x%x (len=%d)\n",
         offset, value, len);
 
@@ -92,6 +108,16 @@ void pci_config_write(struct pci_device *dev, uint8_t offset, uint32_t value, in
 /* Read PCI config space register at given offset and length (1/2/4 bytes) */
 uint32_t pci_config_read(struct pci_device *dev, uint8_t offset, int len)
 {
+    /* Absent device: return all-ones (0xFFFF vendor = no device) */
+    if (!dev->present) {
+        if (len == 4)
+            return 0xFFFFFFFF;
+        else if (len == 2)
+            return 0xFFFF;
+        else
+            return 0xFF;
+    }
+
     uint32_t value = 0;
     if (len == 4)
         value = *(uint32_t *)&dev->config[offset];
