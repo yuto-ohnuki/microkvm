@@ -28,6 +28,11 @@
 #define PCI_DEVICE_ID           0x0001
 #define PCI_BAR0_SIZE           4096    /* 4KB MMIO region */
 
+/* Device registers within BAR0 MMIO region (offsets from BAR0 base) */
+#define PCI_DEV_REG_STATUS      0x00
+#define PCI_DEV_REG_DOORBELL    0x04
+#define PCI_DEV_REG_RESULT      0x08
+
 struct pci_device {
     uint8_t config[256];       /* PCI config space (Type 0 header) */
     uint32_t bar0_mask;        /* BAR0 size mask for probing */
@@ -37,5 +42,9 @@ struct pci_device {
 void pci_init(struct pci_device *dev);
 void pci_config_write(struct pci_device *dev, uint8_t offset, uint32_t value, int len);
 uint32_t pci_config_read(struct pci_device *dev, uint8_t offset, int len);
+
+uint32_t pci_bar0_addr(struct pci_device *dev);
+uint32_t pci_dev_mmio_read(struct pci_device *dev, uint64_t offset);
+void pci_dev_mmio_write(struct pci_device *dev, uint64_t offset, uint32_t value);
 
 #endif /* PCI_H */

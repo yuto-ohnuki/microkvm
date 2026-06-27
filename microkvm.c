@@ -431,6 +431,20 @@ static void *vcpu_thread(void *arg) {
                     uint32_t val = virtio_mmio_read(&virtio_dev, offset, run->mmio.len);
                     memcpy(run->mmio.data, &val, run->mmio.len);
                 }
+            } else {
+                /* PCI BAR0 MMIO — device registers accessed via BAR0 address */
+                uint32_t bar0 = pci_bar0_addr(&pci_dev);
+                if (bar0 && addr >= bar0 && addr < bar0 + PCI_BAR0_SIZE) {
+                    uint64_t offset = addr - bar0;
+                    if (run->mmio.is_write) {
+                        uint32_t val = 0;
+                        memcpy(&val, run->mmio.data, run->mmio.len);
+                        pci_dev_mmio_write(&pci_dev, offset, val);
+                    } else {
+                        uint32_t val = pci_dev_mmio_read(&pci_dev, offset);
+                        memcpy(run->mmio.data, &val, run->mmio.len);
+                    }
+                }
             }
             break;
         }

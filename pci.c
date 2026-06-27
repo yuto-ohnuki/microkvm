@@ -35,6 +35,12 @@ void pci_init(struct pci_device *dev)
     dev->config_address = 0;
 }
 
+
+/* Extract BAR0 base address (mask out type bits in lower 4 bits) */
+uint32_t pci_bar0_addr(struct pci_device *dev) {
+    return *(uint32_t *)&dev->config[0x10] & 0xFFFFF000;
+}
+
 /*
  * Handle PCI config space write.
  * BAR0 has special handling for size probing:
@@ -80,4 +86,37 @@ uint32_t pci_config_read(struct pci_device *dev, uint8_t offset, int len)
     fprintf(stderr, "[pci] config read  offset=0x%02x → 0x%x (len=%d)\n",
         offset, value, len);
     return value;
+}
+
+/* Device MMIO register read — BAR0 region */
+uint32_t pci_dev_mmio_read(struct pci_device *dev, uint64_t offset)
+{
+    uint32_t val = 0;
+    switch (offset) {
+    case PCI_DEV_REG_STATUS:
+        val = 0x01;
+        break;  /* ready */
+    case PCI_DEV_REG_RESULT:
+        val = 0x42;
+        break;  /* result */
+    default:
+        break;
+    }
+    fprintf(stderr, "[pci-dev] MMIO read  offset=0x%02lx → 0x%x\n",
+        (unsigned long)offset, val);
+    return val;
+}
+
+/* Device MMIO register write — BAR0 region */
+void pci_dev_mmio_write(struct pci_device *dev, uint64_t offset, uint32_t value)
+{
+    fprintf(stderr, "[pci-dev] MMIO write offset=0x%02lx ← 0x%x\n",
+        (unsigned long)offset, value);
+    switch (offset) {
+    case PCI_DEV_REG_DOORBELL:
+        fprintf(stderr, "[pci-dev] doorbell kicked!\n");
+        break;
+    default:
+        break;
+    }
 }
