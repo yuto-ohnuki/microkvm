@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include "pci.h"
 
 /*
@@ -34,7 +35,6 @@ void pci_init(struct pci_device *dev)
 
     dev->config_address = 0;
 }
-
 
 /* Extract BAR0 base address (mask out type bits in lower 4 bits) */
 uint32_t pci_bar0_addr(struct pci_device *dev) {
@@ -97,7 +97,7 @@ uint32_t pci_dev_mmio_read(struct pci_device *dev, uint64_t offset)
         val = 0x01;
         break;  /* ready */
     case PCI_DEV_REG_RESULT:
-        val = 0x42;
+        val = dev->last_dma_len;
         break;  /* result */
     default:
         break;
@@ -113,8 +113,38 @@ void pci_dev_mmio_write(struct pci_device *dev, uint64_t offset, uint32_t value)
     fprintf(stderr, "[pci-dev] MMIO write offset=0x%02lx ← 0x%x\n",
         (unsigned long)offset, value);
     switch (offset) {
-    case PCI_DEV_REG_DOORBELL:
-        fprintf(stderr, "[pci-dev] doorbell kicked!\n");
+    case PCI_DEV_REG_DOORBELL: {
+        /* Read descriptor from guest RAM */
+        if (dev->desc_addr + sizeof(struct dma_desc) > dev->ram_size)
+            break;
+        struct dma_desc desc;
+        memcpy(&desc, dev->ram + dev->desc_addr, sizeof(desc));
+        if (desc.addr + desc.len > dev->ram_size)
+            break;
+
+        if (desc.flags == 0) {
+            /* DMA: Device reads from guest (TX path) */
+            fprintf(stderr, "[pci-dma] DMA read: %u bytes from GPA 0x%lx\n",
+                desc.len, (unsigned long)desc.addr);
+            write(STDOUT_FILENO, dev->ram + desc.addr, desc.len);
+        } else {
+            /* DMA: Device writes to guest (RX path) */
+            const char *msg = "DMA-WRITE-OK\n";
+            size_t msg_len = strlen(msg);
+            if (msg_len > desc.len)
+                msg_len = desc.len;
+            memcpy(dev->ram + desc.addr, msg, msg_len);
+            fprintf(stderr, "[pci-dma] DMA write: %zu bytes to GPA 0x%lx\n",
+                msg_len, (unsigned long)desc.addr);
+        }
+        dev->last_dma_len = desc.len;
+        break;
+    }
+    case PCI_DEV_REG_DESC_LO:
+        dev->desc_addr = (dev->desc_addr & 0xFFFFFFFF00000000ULL) | value;
+        break;
+    case PCI_DEV_REG_DESC_HI:
+        dev->desc_addr = (dev->desc_addr & 0xFFFFFFFF) | ((uint64_t)value << 32);
         break;
     default:
         break;

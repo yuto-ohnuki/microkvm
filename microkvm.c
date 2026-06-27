@@ -665,6 +665,10 @@ int main(int argc, char *argv[]) {
     virtio_dev.ram = (uint8_t *)mem;
     virtio_dev.ram_size = GUEST_MEM_SIZE;
 
+    /* Give PCI device access to guest memory */
+    pci_dev.ram = (uint8_t *)mem;
+    pci_dev.ram_size = GUEST_MEM_SIZE;
+
     /* Get vCPU mmap size */
     mmap_size = ioctl(kvmfd, KVM_GET_VCPU_MMAP_SIZE, NULL);
 
