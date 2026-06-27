@@ -13,13 +13,14 @@
 #include <sys/eventfd.h>    /* eventfd for ioeventfd/irqfd */
 #include <linux/kvm.h>      /* KVM_* constants */
 #include "microkvm.h"
+#include "pci.h"
 #include "boot.h"
 #include "uart.h"
 #include "snapshot.h"
 #include "kvm_stats.h"
 #include "virtio_mmio.h"
 
-#define CMDLINE "console=ttyS0 earlyprintk=serial rdinit=/init virtio_mmio.device=0x200@0xd0000000:5"
+#define CMDLINE "console=ttyS0 earlyprintk=serial pci=conf1 virtio_mmio.device=0x200@0xd0000000:5"
 
 /* ===== Benchmark: exit counting and latency measurement =====
  *
@@ -137,6 +138,9 @@ static struct uart8250 uart;
 
 /* Virtio-mmio device */
 static struct virtio_mmio_dev virtio_dev;
+
+/* PCI device */
+static struct pci_device pci_dev;
 
 /* Eventfd for transmitq kick */
 static int txkick_fd;
@@ -349,10 +353,46 @@ static void *vcpu_thread(void *arg) {
             uint16_t port = run->io.port;
             uint8_t *data = (uint8_t *)((char *)run + run->io.data_offset);
             if (port >= UART_BASE && port <= UART_BASE + 7) {
+                /* UART */
                 if (run->io.direction == KVM_EXIT_IO_OUT)
                     uart_out(&uart, port, *data, g_vmfd);
                 else
                     *data = uart_in(&uart, port);
+            } else if (port == PCI_CONFIG_ADDR_PORT) {
+                /* PCI config address */
+                if (run->io.direction == KVM_EXIT_IO_OUT)
+                    memcpy(&pci_dev.config_address, data, 4);
+                else
+                    memcpy(data, &pci_dev.config_address, 4);
+            } else if (port >= PCI_CONFIG_DATA_PORT && port <= PCI_CONFIG_DATA_PORT + 3) {
+                /* PCI config data — decode BDF from address register */
+                uint32_t addr = pci_dev.config_address;
+                if (!(addr & 0x80000000)) {
+                    /* Enable bit not set — no device selected */
+                    if (run->io.direction == KVM_EXIT_IO_IN)
+                        memset(data, 0xFF, run->io.size);
+                } else {
+                    uint8_t bus = (addr >> 16) & 0xFF;
+                    uint8_t device = (addr >> 11) & 0x1F;
+                    uint8_t func = (addr >> 8) & 0x07;
+                    uint8_t offset = (addr & 0xFC) + (port - PCI_CONFIG_DATA_PORT);
+
+                    if (bus == 0 && device == 0 && func == 0) {
+                        /* Our device at 00:00.0 */
+                        if (run->io.direction == KVM_EXIT_IO_OUT) {
+                            uint32_t val = 0;
+                            memcpy(&val, data, run->io.size);
+                            pci_config_write(&pci_dev, offset, val, run->io.size);
+                        } else {
+                            uint32_t val = pci_config_read(&pci_dev, offset, run->io.size);
+                            memcpy(data, &val, run->io.size);
+                        }
+                    } else {
+                        /* No device at this BDF — return all-ones (0xFFFF = no device) */
+                        if (run->io.direction == KVM_EXIT_IO_IN)
+                            memset(data, 0xFF, run->io.size);
+                    }
+                }
             } else if (run->io.direction == KVM_EXIT_IO_IN) {
                 *data = 0;
             }
@@ -474,6 +514,9 @@ int main(int argc, char *argv[]) {
 
     /* Initialize virtio-mmio device */
     virtio_mmio_init(&virtio_dev);
+
+    /* Initialize PCI device */
+    pci_init(&pci_dev);
 
     /* Create eventfd for transmitq kick (ioeventfd) */
     txkick_fd = eventfd(0, EFD_CLOEXEC);
