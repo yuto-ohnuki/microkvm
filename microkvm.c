@@ -436,13 +436,27 @@ static void *vcpu_thread(void *arg) {
                 uint32_t bar0 = pci_bar0_addr(&pci_dev);
                 if (bar0 && addr >= bar0 && addr < bar0 + PCI_BAR0_SIZE) {
                     uint64_t offset = addr - bar0;
-                    if (run->mmio.is_write) {
-                        uint32_t val = 0;
-                        memcpy(&val, run->mmio.data, run->mmio.len);
-                        pci_dev_mmio_write(&pci_dev, offset, val);
+                    if (offset >= PCI_MSIX_TABLE_OFFSET &&
+                        offset < PCI_MSIX_TABLE_OFFSET + PCI_MSIX_TABLE_ENTRIES * 16) {
+                        /* MSI-X table */
+                        if (run->mmio.is_write) {
+                            uint32_t val = 0;
+                            memcpy(&val, run->mmio.data, run->mmio.len);
+                            pci_msix_write(&pci_dev, offset, val);
+                        } else {
+                            uint32_t val = pci_msix_read(&pci_dev, offset);
+                            memcpy(run->mmio.data, &val, run->mmio.len);
+                        }
                     } else {
-                        uint32_t val = pci_dev_mmio_read(&pci_dev, offset);
-                        memcpy(run->mmio.data, &val, run->mmio.len);
+                        /* Device registers */
+                        if (run->mmio.is_write) {
+                            uint32_t val = 0;
+                            memcpy(&val, run->mmio.data, run->mmio.len);
+                            pci_dev_mmio_write(&pci_dev, offset, val);
+                        } else {
+                            uint32_t val = pci_dev_mmio_read(&pci_dev, offset);
+                            memcpy(run->mmio.data, &val, run->mmio.len);
+                        }
                     }
                 }
             }
@@ -531,6 +545,7 @@ int main(int argc, char *argv[]) {
 
     /* Initialize PCI device */
     pci_init(&pci_dev);
+    pci_dev.vmfd = vmfd;    /* needed for KVM_SIGNAL_MSI in doorbell handler */
 
     /* Create eventfd for transmitq kick (ioeventfd) */
     txkick_fd = eventfd(0, EFD_CLOEXEC);

@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include "pci.h"
 
 /*
@@ -32,6 +33,22 @@ void pci_init(struct pci_device *dev)
 
     /* BAR0 size mask: writing 0xFFFFFFFF and reading back reveals size */
     dev->bar0_mask = ~(PCI_BAR0_SIZE - 1);
+
+    /* Capabilities pointer → offset 0x40 */
+    dev->config[0x34] = 0x40;
+
+    /* MSI-X capability at 0x40 (11 bytes) */
+    dev->config[0x40] = 0x11;       /* cap ID = MSI-X */
+    dev->config[0x41] = 0x00;       /* next cap = NULL */
+
+    /* Message Control: table size = 0 (means 1 entry), function not masked */
+    *(uint16_t *)&dev->config[0x42] = 0x0000;
+
+    /* Table BIR=0, offset=0x800 */
+    *(uint32_t *)&dev->config[0x44] = PCI_MSIX_TABLE_OFFSET;
+
+    /* PBA BIR=0, offset=0xC00 */
+    *(uint32_t *)&dev->config[0x48] = 0x00000C00;
 
     dev->config_address = 0;
 }
@@ -138,6 +155,18 @@ void pci_dev_mmio_write(struct pci_device *dev, uint64_t offset, uint32_t value)
                 msg_len, (unsigned long)desc.addr);
         }
         dev->last_dma_len = desc.len;
+
+        /* Inject MSI-X after DMA completion */
+        if (!(dev->msix_table[0].ctrl & 1) && dev->msix_table[0].addr_lo) {
+            struct kvm_msi msi = {
+                .address_lo = dev->msix_table[0].addr_lo,
+                .address_hi = dev->msix_table[0].addr_hi,
+                .data = dev->msix_table[0].data,
+            };
+            ioctl(dev->vmfd, KVM_SIGNAL_MSI, &msi);
+            fprintf(stderr, "[pci-msix] IRQ injected: addr=0x%x data=0x%x\n",
+                msi.address_lo, msi.data);
+        }
         break;
     }
     case PCI_DEV_REG_DESC_LO:
@@ -149,4 +178,18 @@ void pci_dev_mmio_write(struct pci_device *dev, uint64_t offset, uint32_t value)
     default:
         break;
     }
+}
+
+/* Read MSI-X table entry — guest driver reads to check vector configuration */
+uint32_t pci_msix_read(struct pci_device *dev, uint64_t offset) {
+    uint32_t *table = (uint32_t *)dev->msix_table;
+    return table[(offset - PCI_MSIX_TABLE_OFFSET) / 4];
+}
+
+/* Write MSI-X table entry — guest driver programs addr/data/ctrl for each vector */
+void pci_msix_write(struct pci_device *dev, uint64_t offset, uint32_t value) {
+    uint32_t *table = (uint32_t *)dev->msix_table;
+    table[(offset - PCI_MSIX_TABLE_OFFSET) / 4] = value;
+    fprintf(stderr, "[pci-msix] table write offset=0x%lx val=0x%x\n",
+            (unsigned long)offset, value);
 }

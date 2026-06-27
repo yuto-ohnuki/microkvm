@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <linux/kvm.h>
 
 /*
  * PCI Configuration Mechanism
@@ -35,6 +36,10 @@
 #define PCI_DEV_REG_DESC_LO     0x0C
 #define PCI_DEV_REG_DESC_HI     0x10
 
+/* MSI-X table location within BAR0 (offset 0x800, 1 vector) */
+#define PCI_MSIX_TABLE_OFFSET   0x800
+#define PCI_MSIX_TABLE_ENTRIES  1
+
 /*
  * DMA descriptor — placed in guest RAM by the driver.
  * Device reads this to know where and how much data to transfer.
@@ -43,6 +48,14 @@ struct dma_desc {
     uint64_t addr;
     uint32_t len;
     uint32_t flags;     /* 0=device reads from guest */
+};
+
+/* MSI-X table entry (16 bytes per vector) */
+struct msix_entry {
+    uint32_t addr_lo;
+    uint32_t addr_hi;
+    uint32_t data;
+    uint32_t ctrl;      /* bit 0: masked */
 };
 
 struct pci_device {
@@ -55,6 +68,10 @@ struct pci_device {
     uint32_t last_dma_len;      /* result of last DMA operation */
     uint8_t *ram;               /* pointer to guest RAM (set by VMM) */
     size_t ram_size;
+
+    /* MSI-X */
+    struct msix_entry msix_table[PCI_MSIX_TABLE_ENTRIES];
+    int vmfd;                   /* for KVM_SIGNAL_MSI */
 };
 
 void pci_init(struct pci_device *dev);
@@ -64,5 +81,8 @@ uint32_t pci_config_read(struct pci_device *dev, uint8_t offset, int len);
 uint32_t pci_bar0_addr(struct pci_device *dev);
 uint32_t pci_dev_mmio_read(struct pci_device *dev, uint64_t offset);
 void pci_dev_mmio_write(struct pci_device *dev, uint64_t offset, uint32_t value);
+
+uint32_t pci_msix_read(struct pci_device *dev, uint64_t offset);
+void pci_msix_write(struct pci_device *dev, uint64_t offset, uint32_t value);
 
 #endif /* PCI_H */
