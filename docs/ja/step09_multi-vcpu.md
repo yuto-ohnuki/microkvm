@@ -1,5 +1,12 @@
 # Step 9: 複数 vCPU
 
+> **Phase B: Linux Boot**
+>
+> Phase A はベアメタル guest コードで CPU 仮想化の基礎を構築した。
+> Phase B では実際の Linux kernel を boot する: マルチ vCPU、bzImage ロード、
+> シリアルコンソール、対話シェル。終了時には guest が busybox による完全な
+> Linux userspace を実行する。
+
 ## 目的
 
 **pthread** を使って2つの vCPU を並列実行し、共有デバイス状態と同期の必要性を導入する。

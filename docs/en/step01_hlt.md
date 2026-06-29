@@ -1,5 +1,11 @@
 # Step 1: Execute `hlt`
 
+> **Phase A: CPU Virtualization**
+>
+> Phase A covers the fundamentals of hardware-assisted virtualization: creating a VM,
+> running guest code on a real CPU via KVM, and handling the transitions between
+> guest and host (VM exits). Each step adds one CPU virtualization concept.
+
 ## Goal
 
 Run a single guest instruction (`hlt`) on a real CPU using the KVM API.

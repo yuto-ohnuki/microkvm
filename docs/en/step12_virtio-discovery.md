@@ -1,5 +1,11 @@
 # Step 12: virtio-mmio device discovery
 
+> **Phase C: High-Performance I/O (virtio)**
+>
+> Phase B used UART for serial I/O — functional but slow (1 VM exit per byte).
+> Phase C implements virtio, the standard paravirtualized I/O framework: shared memory
+> rings, batched notifications, and kernel-resident event delivery (ioeventfd/irqfd).
+
 ## Goal
 
 Implement a virtio-mmio register space in the VMM so that the Linux kernel's virtio-mmio driver can discover and identify the device. This is the first step toward shared-memory I/O.

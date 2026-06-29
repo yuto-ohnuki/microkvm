@@ -1,5 +1,11 @@
 # Step 19: KVM MMU stats — メモリ仮想化の観察
 
+> **Phase D: Memory State Management**
+>
+> Phase A–C は CPU 実行、デバイスエミュレーション、I/O 性能に焦点を当てた。
+> Phase D はメモリ状態に移る: KVM が guest ページをどうマッピングし、変更を追跡し、
+> 最終的に snapshot と live migration を可能にするか。
+
 ## 目的
 
 `KVM_GET_STATS_FD` で per-VM / per-vCPU の MMU カウンタを boot 前後で取得する。demand paging、EPT fault の解決、exit の内訳を実際の数値で観察する。

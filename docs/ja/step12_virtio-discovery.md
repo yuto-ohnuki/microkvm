@@ -1,5 +1,11 @@
 # Step 12: virtio-mmio デバイス検出
 
+> **Phase C: 高性能 I/O (virtio)**
+>
+> Phase B は UART でシリアル I/O を実現した — 動くが遅い（1バイトごとに 1 VM exit）。
+> Phase C では標準的な準仮想化 I/O フレームワークである virtio を実装する: 共有メモリリング、
+> バッチ通知、カーネル内イベント配送（ioeventfd/irqfd）。
+
 ## 目的
 
 VMM に virtio-mmio レジスタ空間を実装し、Linux kernel の virtio-mmio ドライバがデバイスを発見・認識できるようにする。shared memory I/O への第一歩。

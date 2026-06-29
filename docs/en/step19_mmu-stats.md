@@ -1,5 +1,11 @@
 # Step 19: KVM MMU stats — observing memory virtualization
 
+> **Phase D: Memory State Management**
+>
+> Phases A–C focused on CPU execution, device emulation, and I/O performance.
+> Phase D shifts to memory state: how KVM maps guest pages, tracks modifications,
+> and ultimately enables snapshots and live migration.
+
 ## Goal
 
 Use `KVM_GET_STATS_FD` to capture per-VM and per-vCPU MMU counters before and after boot. Observe demand paging, EPT fault resolution, and exit breakdown through real numbers.

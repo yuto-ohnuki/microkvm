@@ -1,5 +1,12 @@
 # Step 9: Multiple vCPUs
 
+> **Phase B: Linux Boot**
+>
+> Phase A built the CPU virtualization foundation with bare-metal guest code.
+> Phase B boots a real Linux kernel: multi-vCPU support, bzImage loading,
+> serial console, and an interactive shell. By the end, the guest runs a full
+> Linux userspace with busybox.
+
 ## Goal
 
 Run two vCPUs in parallel using **pthreads**, introducing shared device state and the need for synchronization.

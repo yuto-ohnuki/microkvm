@@ -1,5 +1,11 @@
 # Step 1: `hlt` の実行
 
+> **Phase A: CPU Virtualization**
+>
+> Phase A はハードウェア仮想化支援の基礎を扱う: VM の作成、KVM 経由で実 CPU 上で
+> guest コードを実行、guest ↔ host 間の遷移（VM exit）の処理。
+> 各ステップが CPU 仮想化の概念を1つずつ追加する。
+
 ## 目的
 
 KVM API を使って、1つのゲスト命令 (`hlt`) を実際の CPU 上で実行する。
