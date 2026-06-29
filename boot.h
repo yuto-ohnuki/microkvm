@@ -9,6 +9,7 @@
 #define CMDLINE_ADDR      0x20000
 #define KERNEL_ADDR       0x100000
 #define INITRD_ADDR       0x4000000
+#define MP_TABLE_ADDR     0xF0000
 
 int load_bzimage(const char *path, void *mem, const char *cmdline);
 int load_initramfs(const char *path, void *mem, uint32_t *out_size);

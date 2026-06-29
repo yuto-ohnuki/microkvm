@@ -1,6 +1,8 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
+#include <linux/interrupt.h>
+#include <linux/completion.h>
 
 /*
  * microkvm PCI device driver
@@ -29,10 +31,22 @@ struct microkvm_dma_desc {
 
 struct microkvm_dev {
     struct pci_dev *pdev;
+    struct completion dma_done;
     void __iomem *bar0;
     void *dma_buf;          /* coherent DMA buffer (descriptor + payload) */
     dma_addr_t dma_addr;    /* bus address of dma_buf */
 };
+
+/* MSI-X interrupt handler — called when VMM injects KVM_SIGNAL_MSI after DMA completion */
+static irqreturn_t microkvm_irq_handler(int irq, void *data)
+{
+    struct microkvm_dev *mdev = data;
+    u32 status = readl(mdev->bar0 + REG_STATUS);
+
+    dev_info(&mdev->pdev->dev, "IRQ: status=0x%x\n", status);
+    complete(&mdev->dma_done);
+    return IRQ_HANDLED;
+}
 
 /* Called when PCI core finds a device matching our ID table */
 static int microkvm_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
@@ -40,13 +54,16 @@ static int microkvm_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
     struct microkvm_dev *mdev;
     struct microkvm_dma_desc *desc;
     char *payload;
-    int ret;
+    int ret, irq, nvec;
     u32 status;
     u32 result;
 
     mdev = devm_kzalloc(&pdev->dev, sizeof(*mdev), GFP_KERNEL);
     if (!mdev)
         return -ENOMEM;
+
+    mdev->pdev = pdev;
+    init_completion(&mdev->dma_done);
 
     /* Enable device — sets Memory Space Enable in Command register */
     ret = pci_enable_device(pdev);
@@ -68,12 +85,28 @@ static int microkvm_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
     /* Enable bus mastering — sets bit 2 in Command register (required for DMA) */
     pci_set_master(pdev);
 
+    /* Allocate MSI-X vector */
+    nvec = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSIX);
+    if (nvec < 0) {
+        dev_err(&pdev->dev, "Failed to allocate MSI-X vector: %d\n", nvec);
+        ret = nvec;
+        goto err_iomap;
+    }
+
+    /* Get Linux IRQ number for MSI-X vector 0 */
+    irq = pci_irq_vector(pdev, 0);
+    ret = request_irq(irq, microkvm_irq_handler, 0, "microkvm_pci", mdev);
+    if (ret) {
+        dev_err(&pdev->dev, "Failed to request IRQ: %d\n", ret);
+        goto err_irq_vec;
+    }
+
     /* Allocate coherent DMA buffer: descriptor at start, payload after it */
     mdev->dma_buf = dma_alloc_coherent(&pdev->dev, 4096,
         &mdev->dma_addr, GFP_KERNEL);
     if (!mdev->dma_buf) {
         ret = -ENOMEM;
-        goto err_iomap;
+        goto err_irq;
     }
 
     pci_set_drvdata(pdev, mdev);
@@ -87,23 +120,29 @@ static int microkvm_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
     desc->len = 18;
     desc->flags = 0;    /* device reads from guest (TX) */
 
-    /* Tell device where descriptor is */
-    writel(lower_32_bits(mdev->dma_addr), mdev->bar0 + REG_DESC_LO);
-    writel(upper_32_bits(mdev->dma_addr), mdev->bar0 + REG_DESC_HI);
-
     /* Confirm device is ready */
     status = readl(mdev->bar0 + REG_STATUS);
     dev_info(&pdev->dev, "STATUS = 0x%x\n", status);
 
-    /* Kick doorbell — triggers DMA on VMM side */
+    /* Submit: DESC_LO/HI + doorbell */
+    writel(lower_32_bits(mdev->dma_addr), mdev->bar0 + REG_DESC_LO);
+    writel(upper_32_bits(mdev->dma_addr), mdev->bar0 + REG_DESC_HI);
     writel(1, mdev->bar0 + REG_DOORBELL);
 
-    /* Read result — number of bytes transferred */
-    result = readl(mdev->bar0 + REG_RESULT);
-    dev_info(&pdev->dev, "DMA complete, transferred %u bytes\n", result);
+    /* Wait for completion via MSI-X interrupt */
+    if (!wait_for_completion_timeout(&mdev->dma_done, HZ * 5)) {
+        dev_err(&pdev->dev, "DMA timeout!\n");
+    } else {
+        result = readl(mdev->bar0 + REG_RESULT);
+        dev_info(&pdev->dev, "DMA done via MSI-X, transferred %u bytes\n", result);
+    }
 
     return 0;
 
+err_irq:
+    free_irq(pci_irq_vector(pdev, 0), mdev);
+err_irq_vec:
+    pci_free_irq_vectors(pdev);
 err_iomap:
     pci_iounmap(pdev, mdev->bar0);
 err_regions:
@@ -119,6 +158,8 @@ static void microkvm_remove(struct pci_dev *pdev)
     struct microkvm_dev *mdev = pci_get_drvdata(pdev);
 
     /* Release resources in reverse order of probe acquisition */
+    free_irq(pci_irq_vector(pdev, 0), mdev);
+    pci_free_irq_vectors(pdev);
     dma_free_coherent(&pdev->dev, 4096, mdev->dma_buf, mdev->dma_addr);
     pci_iounmap(pdev, mdev->bar0);
     pci_release_regions(pdev);
