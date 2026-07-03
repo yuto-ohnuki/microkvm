@@ -12,7 +12,7 @@ microkvm には ioeventfd (Step 17) と irqfd (Step 18) の性能影響を計測
 ec8f80d tools: add latency benchmark for ioeventfd and irqfd
 ```
 
-ベンチマークを使うには、このコミット（または `v2` ブランチ上のこれ以降のコミット）をチェックアウトする。`step18` タグにはベンチマークコードは含まれない — ioeventfd + irqfd のクリーンな実装のみ。
+ベンチマークを使うには、このコミット（または main 上のこれ以降のコミット）をチェックアウトする。`step18` タグにはベンチマークコードは含まれない — ioeventfd + irqfd のクリーンな実装のみ。
 
 ## 使い方
 

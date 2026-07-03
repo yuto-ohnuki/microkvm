@@ -164,7 +164,7 @@ hello
 
 `hello` が host ターミナルに表示される — guest RAM から vring 経由で直接書き出され、文字列全体で QueueNotify の VM exit は1回だけ。
 
-> **Note:** v2 のコードでは QueueNotify のログを抑制している（boot 時にノイズになるため）。ログを有効にすると `[virtio-mmio] write offset=0x050 ← 0x1` が出力前に表示される。
+> **Note:** QueueNotify のログはデフォルトで抑制している（boot 時にノイズになるため）。ログを有効にすると `[virtio-mmio] write offset=0x050 ← 0x1` が出力前に表示される。
 
 ## 重要な知見
 

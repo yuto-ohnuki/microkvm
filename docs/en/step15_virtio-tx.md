@@ -164,7 +164,7 @@ hello
 
 The `hello` appears on the host terminal — written directly from guest RAM via the vring, with only a single QueueNotify VM exit for the entire string.
 
-> **Note:** QueueNotify logs are suppressed in v2 (they are noisy during boot). With logging enabled, `[virtio-mmio] write offset=0x050 ← 0x1` would appear before the output.
+> **Note:** QueueNotify logs are suppressed by default (they are noisy during boot). With logging enabled, `[virtio-mmio] write offset=0x050 ← 0x1` would appear before the output.
 
 ## Key insight
 

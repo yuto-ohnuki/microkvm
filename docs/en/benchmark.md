@@ -12,7 +12,7 @@ The benchmark instrumentation is in a separate commit on top of Step 18:
 ec8f80d tools: add latency benchmark for ioeventfd and irqfd
 ```
 
-To enable the benchmark, check out this commit (or any commit after it on the `v2` branch). The `step18` tag does **not** include the benchmark code — it contains the clean ioeventfd + irqfd implementation only.
+To enable the benchmark, check out this commit (or any later commit on main). The `step18` tag does **not** include the benchmark code — it contains the clean ioeventfd + irqfd implementation only.
 
 ## Usage
 
