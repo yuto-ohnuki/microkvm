@@ -40,6 +40,9 @@ Unlike production VMMs such as QEMU, microkvm intentionally prioritizes readabil
 - BAR mapping from kernel space (`pci_iomap`, `readl`/`writel`)
 - DMA from a Linux driver (`dma_alloc_coherent`, descriptor submission)
 - MSI-X interrupt handling (`pci_alloc_irq_vectors`, `request_irq`)
+- Follow VM exits through Linux KVM source code
+- Trace KVM internals with ftrace and perf
+- Understand VMCS and EPT at the hardware level
 
 ## Why microkvm?
 
@@ -47,18 +50,21 @@ QEMU is production-grade and feature-rich. microkvm intentionally trades complet
 
 ## Current Status
 
-- ✅ Phase A: Basics (Step 1–8)
-- ✅ Phase B: Linux Boot (Step 9–11)
-- ✅ Phase C: Virtio and Exit Reduction (Step 12–18)
-- ✅ Phase D: Memory State Management (Step 19–22)
-- ✅ Phase E: PCI Device Model (Step 23–27)
-- ✅ Phase F: Linux PCI Driver (Step 28–31)
-- 🔲 Phase G: KVM Internals (planned)
-- 🔲 Phase H: VT-x / VMCS (research)
+- ✅ **Part 1: Build a Hypervisor**
+  - ✅ Phase A: Basics (Step 1–8)
+  - ✅ Phase B: Linux Boot (Step 9–11)
+  - ✅ Phase C: Virtio and Exit Reduction (Step 12–18)
+  - ✅ Phase D: Memory State Management (Step 19–22)
+  - ✅ Phase E: PCI Device Model (Step 23–27)
+  - ✅ Phase F: Linux PCI Driver (Step 28–31)
+- 🔲 **Part 2: Understand KVM Through VM Exits** (Step 32–39)
+- 🔲 **Part 3: Understand Hardware Virtualization** (Step 40–42)
 
 ## Steps
 
 Each step adds exactly one concept. Every step is tagged in git.
+
+## Part 1: Build a Hypervisor (Step 1–31)
 
 ### Phase A: Basics (Step 1–8)
 
@@ -153,40 +159,27 @@ Live migration (Step 22):
 > Together they demonstrate both sides of a device virtualization stack:
 > the device model in the VMM and the driver inside the guest kernel.
 
-### Phase G: KVM Internals (Step 32–39) - planned
+
+## Part 2: Understand KVM Through VM Exits (Step 32–39)
 
 | Step | Concept | What You Learn |
 |------|---------|----------------|
-| 32 | VM exit profiler | Exit reason frequency and latency measurement |
-| 33 | Exit timeline | Time-series exit pattern visualization |
-| 34 | KVM tracepoints | ftrace / perf for KVM internal events |
-| 35 | Host+guest correlation | Mapping host-side events to guest behavior |
-| 36 | VM exit internals | KVM source: exit handling path |
-| 37 | Interrupt virtualization internals | KVM source: LAPIC, posted interrupts |
-| 38 | MSR virtualization internals | KVM source: MSR bitmap, emulation |
-| 39 | CPUID virtualization internals | KVM source: CPUID filtering |
+| 32 | Observe VM exits | perf kvm, exit statistics, frequency |
+| 33 | Analyze VM exits | Latency distribution, pattern classification |
+| 34 | Trace KVM internals | ftrace, KVM tracepoints |
+| 35 | The KVM exit pipeline | VM Entry → Guest → VM Exit → vmx_handle_exit() → dispatch → handler → VM Entry |
+| 36 | IRQ exit | How KVM delivers interrupts (LAPIC, posted interrupts) — cf. Step 7 |
+| 37 | MMIO exit | How KVM handles EPT violations for MMIO — cf. Step 5 |
+| 38 | MSR exit | How KVM uses MSR bitmap and emulation — cf. Step 8 |
+| 39 | CPUID exit | How KVM filters CPUID |
 
-### Phase H: VT-x / VMCS (Step 40–43) - research topics
+## Part 3: Understand Hardware Virtualization (Step 40–42)
 
 | Step | Concept | What You Learn |
 |------|---------|----------------|
 | 40 | VMCS explorer | VMCS field dump and analysis |
 | 41 | EPT explorer | EPT table walk visualization |
 | 42 | VM entry/exit controls | VMCS control field experiments |
-| 43 | Tiny VMX hypervisor | Minimal VMX implementation without KVM |
-
-> **Note:** Phase H is research-level. Step 43 in particular is a separate project in scope.
-
-## Architecture
-
-```
-Phase A–E (Step 1–27):   Build a VMM (How to build a VMM)
-Phase F   (Step 28–31):  Build a driver (How to drive the device from Linux)
-Phase G   (Step 32–39):  Observe KVM (How KVM works - from outside)
-Phase H   (Step 40–43):  Touch VT-x directly (How VT-x works - from inside)
-```
-
-VMCS is last because knowing MMIO, IRQ, MSR, virtio, migration, and device drivers makes every VMCS field meaningful - "that exit was controlled by *this* field."
 
 ## Navigating Steps
 
