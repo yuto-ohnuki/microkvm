@@ -37,6 +37,8 @@ static int use_ioeventfd = 0;   /* 0=Step15 style, 1=Step17 style */
 static int use_irqfd = 0;       /* 0=Step16 style, 1=Step18 style */
 
 static volatile sig_atomic_t stop_requested;
+static volatile sig_atomic_t dump_requested;   /* Step 40.2: Ctrl-A p → vCPU thread dumps state */
+
 static void sigint_handler(int sig)
 {
     (void)sig;
@@ -272,6 +274,11 @@ static void *stdin_thread(void *arg) {
                 print_dirty_log(g_vmfd, GUEST_MEM_SIZE);
                 continue;
             }
+            if (c == 'p') {
+                fprintf(stderr, "\n[monitor] dumping guest state (Ctrl-A p)\n");
+                dump_requested = 1;     /* vCPU thread dumps when it next returns from KVM_RUN */
+                continue;
+            }
             if (c == 's') {
                 fprintf(stderr, "\n[monitor] saving snapshot...\n");
                 stop_requested = 1;
@@ -350,6 +357,10 @@ static void *vcpu_thread(void *arg) {
     for (;;) {
         if (stop_requested)
             break;
+        if (dump_requested) {
+            dump_cpu_state(vcpu->fd);
+            dump_requested = 0;
+        }
         if (ioctl(vcpu->fd, KVM_RUN, NULL) < 0) {
             perror("KVM_RUN");
             return NULL;

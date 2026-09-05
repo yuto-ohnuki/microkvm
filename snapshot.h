@@ -111,6 +111,13 @@ struct migrate_context {
     uint32_t num_iterations;
 };
 
+/*
+ * Step 40.2: Dump KVM-visible guest state (read-only observation).
+ * Uses the same KVM_GET_REGS/SREGS ioctls as save_cpu_state() but prints
+ * instead of writing to a file. This is the "VMCS explorer" entry point.
+ */
+void dump_cpu_state(int vcpufd);
+
 int snap_save(const char *path, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
     void *mem, size_t mem_size);

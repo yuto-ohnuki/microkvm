@@ -101,6 +101,51 @@ static void save_cpu_state(int fd, int vcpufd, int vmfd,
 }
 
 /*
+ * Step 40.2: Dump KVM-visible guest state in human-readable form.
+ * Read-only observation path — uses the SAME KVM_GET_* ioctls as
+ * save_cpu_state(), but prints instead of writing to a file.
+ * Each field printed here is what KVM exposes of the guest's VMCS
+ * guest-state area (correlated to VMCS fields in Step 40.3).
+ */
+void dump_cpu_state(int vcpufd)
+{
+    struct kvm_regs regs;
+    ioctl(vcpufd, KVM_GET_REGS, &regs);
+
+    struct kvm_sregs sregs;
+    ioctl(vcpufd, KVM_GET_SREGS, &sregs);
+
+    fprintf(stderr, "\n=== guest state dump (KVM-visible) ===\n");
+
+    /* --- control flow / GPRs (→ VMCS GUEST_RIP/RSP/RFLAGS) --- */
+    fprintf(stderr, "RIP    = 0x%016llx\n", (unsigned long long)regs.rip);
+    fprintf(stderr, "RSP    = 0x%016llx\n", (unsigned long long)regs.rsp);
+    fprintf(stderr, "RFLAGS = 0x%016llx\n", (unsigned long long)regs.rflags);
+    fprintf(stderr, "RAX=0x%016llx RBX=0x%016llx\n",
+            (unsigned long long)regs.rax, (unsigned long long)regs.rbx);
+    fprintf(stderr, "RCX=0x%016llx RDX=0x%016llx\n",
+            (unsigned long long)regs.rcx, (unsigned long long)regs.rdx);
+
+    /* --- control registers (→ VMCS GUEST_CR0/CR3/CR4, GUEST_IA32_EFER) --- */
+    fprintf(stderr, "CR0    = 0x%016llx\n", (unsigned long long)sregs.cr0);
+    fprintf(stderr, "CR3    = 0x%016llx\n", (unsigned long long)sregs.cr3);
+    fprintf(stderr, "CR4    = 0x%016llx\n", (unsigned long long)sregs.cr4);
+    fprintf(stderr, "EFER   = 0x%016llx  (LMA=%llu)\n",
+            (unsigned long long)sregs.efer,
+            (unsigned long long)((sregs.efer >> 10) & 1));
+
+    /* --- segments CS/SS (mapped to VMCS GUEST_CS and GUEST_SS fields) --- */
+    fprintf(stderr, "CS: sel=0x%04x base=0x%llx limit=0x%x type=0x%x db=%u l=%u\n",
+            sregs.cs.selector, (unsigned long long)sregs.cs.base,
+            sregs.cs.limit, sregs.cs.type, sregs.cs.db, sregs.cs.l);
+    fprintf(stderr, "SS: sel=0x%04x base=0x%llx limit=0x%x type=0x%x\n",
+            sregs.ss.selector, (unsigned long long)sregs.ss.base,
+            sregs.ss.limit, sregs.ss.type);
+
+    fprintf(stderr, "======================================\n");
+}
+
+/*
  * Save full VM state to file.
  * Called after vCPU has stopped (Ctrl-A s → stop_requested → join).
  */
