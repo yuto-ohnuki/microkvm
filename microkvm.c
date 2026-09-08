@@ -152,10 +152,10 @@ static struct pci_device pci_dev;
 static struct pci_device pci_hotplug_dev;   /* device=1, starts absent */
 
 /* Eventfd for transmitq kick */
-static int txkick_fd;
+static int txkick_fd = -1;
 
 /* eventfd for IRQ5 injection */
-static int irq5_fd;
+static int irq5_fd = -1;
 
 static void *txkick_thread(void *arg) {
     (void)arg;
@@ -939,14 +939,27 @@ int main(int argc, char *argv[]) {
         use_ioeventfd ? "ON" : "OFF", use_irqfd ? "ON" : "OFF");
 
     pthread_t stdin_tid;
-    pthread_create(&stdin_tid, NULL, stdin_thread, NULL);
+    int ret = pthread_create(&stdin_tid, NULL, stdin_thread, NULL);
+    if (ret != 0) {
+        fprintf(stderr, "pthread_create(stdin): %s\n", strerror(ret));
+        exit(1);
+    }
 
     pthread_t txkick_tid;
-    if (use_ioeventfd)
-        pthread_create(&txkick_tid, NULL, txkick_thread, NULL);
+    if (use_ioeventfd) {
+        ret = pthread_create(&txkick_tid, NULL, txkick_thread, NULL);
+        if (ret != 0) {
+            fprintf(stderr, "pthread_create(txkick): %s\n", strerror(ret));
+            exit(1);
+        }
+    }
 
     for (int i = 0; i < NUM_VCPUS; i++) {
-        pthread_create(&threads[i], NULL, vcpu_thread, &vcpus[i]);
+        ret = pthread_create(&threads[i], NULL, vcpu_thread, &vcpus[i]);
+        if (ret != 0) {
+            fprintf(stderr, "pthread_create(vcpu %d): %s\n", i, strerror(ret));
+            exit(1);
+        }
     }
     for (int i = 0; i < NUM_VCPUS; i++) {
         pthread_join(threads[i], NULL);
@@ -979,6 +992,10 @@ int main(int argc, char *argv[]) {
         munmap(vcpus[i].run, mmap_size);
         close(vcpus[i].fd);
     }
+    if (txkick_fd >= 0)
+        close(txkick_fd);
+    if (irq5_fd >= 0)
+        close(irq5_fd);
     close(vmfd);
     close(kvmfd);
     munmap(mem, GUEST_MEM_SIZE);
