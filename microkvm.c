@@ -206,13 +206,13 @@ static const struct kvm_userspace_memory_region *find_memslot(uint64_t gpa)
  * Called via Ctrl-A d monitor command.
  */
 static void print_dirty_log(int vmfd, size_t mem_size) {
-    /* Slot 0: 0 - 0xD0000 (832KB = 208 pages) */
-    size_t slot0_pages = 0xD0000 / 4096;
+    /* Slot 0: [MEM_SLOT0_GPA, MEM_GAP_START) - fixed-size low region */
+    size_t slot0_pages = MEM_SLOT0_SIZE / 4096;
     size_t slot0_bitmap_sz = (slot0_pages + 63) / 64 * 8;
     uint64_t *bitmap0 = calloc(1, slot0_bitmap_sz);
 
-    /* Slot 1: 0xD1000 - end (128MB - 0xD1000) */
-    size_t slot1_pages = (mem_size - 0xD1000) / 4096;
+    /* Slot 1: [MEM_SLOT1_GPA, mem_size) - depends on total VM RAM */
+    size_t slot1_pages = (mem_size - MEM_SLOT1_GPA) / 4096;
     size_t slot1_bitmap_sz = (slot1_pages + 63) / 64 * 8;
     uint64_t *bitmap1 = calloc(1, slot1_bitmap_sz);
 
@@ -224,11 +224,11 @@ static void print_dirty_log(int vmfd, size_t mem_size) {
     }
 
     struct kvm_dirty_log log0 = {
-        .slot = 0,
+        .slot = MEM_SLOT0_ID,
         .dirty_bitmap = bitmap0
     };
     struct kvm_dirty_log log1 = {
-        .slot = 1,
+        .slot = MEM_SLOT1_ID,
         .dirty_bitmap = bitmap1
     };
 
@@ -240,8 +240,10 @@ static void print_dirty_log(int vmfd, size_t mem_size) {
 
     /* Count dirty pages using popcount (number of set bits) */
     char label0[64], label1[64];
-    snprintf(label0, sizeof(label0), "Slot 0 [0x0-0xD0000]:");
-    snprintf(label1, sizeof(label1), "Slot 1 [0xD1000-0x%lx]:", (unsigned long)mem_size);
+    snprintf(label0, sizeof(label0), "Slot 0 [0x%llx-0x%llx]:",
+        (unsigned long long)MEM_SLOT0_GPA, (unsigned long long)MEM_GAP_START);
+    snprintf(label1, sizeof(label1), "Slot 1 [0x%llx-0x%lx]:",
+        (unsigned long long)MEM_SLOT1_GPA, (unsigned long)mem_size);
 
     uint64_t dirty0 = 0, dirty1 = 0;
     for (size_t i = 0; i < slot0_bitmap_sz / 8; i++)
@@ -755,18 +757,18 @@ int main(int argc, char *argv[]) {
      * as the single source of truth (same structs are shown by Ctrl-A e). The
      * gap between slot 0 and slot 1 is left intentionally unregistered. */
     g_memslots[0] = (struct kvm_userspace_memory_region){
-        .slot = 0,
+        .slot = MEM_SLOT0_ID,
         .flags = KVM_MEM_LOG_DIRTY_PAGES,
-        .guest_phys_addr = 0,
-        .memory_size = 0xD0000,
-        .userspace_addr = (uintptr_t)mem,
+        .guest_phys_addr = MEM_SLOT0_GPA,
+        .memory_size = MEM_SLOT0_SIZE,
+        .userspace_addr = (uintptr_t)mem + MEM_SLOT0_GPA,
     };
     g_memslots[1] = (struct kvm_userspace_memory_region){
-        .slot = 1,
+        .slot = MEM_SLOT1_ID,
         .flags = KVM_MEM_LOG_DIRTY_PAGES,
-        .guest_phys_addr = 0xD1000,
-        .memory_size = GUEST_MEM_SIZE - 0xD1000,
-        .userspace_addr = (uintptr_t)mem + 0xD1000,
+        .guest_phys_addr = MEM_SLOT1_GPA,
+        .memory_size = MEM_SLOT1_SIZE,
+        .userspace_addr = (uintptr_t)mem + MEM_SLOT1_GPA,
     };
     g_nr_memslots = MAX_MEMSLOTS;   /* both slots registered */
 

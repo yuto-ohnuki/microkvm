@@ -322,20 +322,20 @@ int snap_restore(const char *path, int vcpufd, int vmfd,
 static int migrate_write_dirty(int fd, int vmfd, void *mem, size_t mem_size,
     uint64_t *out_dirty_count)
 {
-    size_t slot0_pages = 0xD0000 / 4096;
+    size_t slot0_pages = MEM_SLOT0_SIZE / 4096;
     size_t slot0_bitmap_sz = (slot0_pages + 63) / 64 * 8;
     uint64_t *bitmap0 = calloc(1, slot0_bitmap_sz);
 
-    size_t slot1_pages = (mem_size - 0xD1000) / 4096;
+    size_t slot1_pages = (mem_size - MEM_SLOT1_GPA) / 4096;
     size_t slot1_bitmap_sz = (slot1_pages + 63) / 64 * 8;
     uint64_t *bitmap1 = calloc(1, slot1_bitmap_sz);
 
     struct kvm_dirty_log log0 = {
-        .slot = 0,
+        .slot = MEM_SLOT0_ID,
         .dirty_bitmap = bitmap0
     };
     struct kvm_dirty_log log1 = {
-        .slot = 1,
+        .slot = MEM_SLOT1_ID,
         .dirty_bitmap = bitmap1
     };
 
@@ -351,7 +351,7 @@ static int migrate_write_dirty(int fd, int vmfd, void *mem, size_t mem_size,
 
     write(fd, &dirty_count, sizeof(dirty_count));
 
-    /* Write slot 0 dirty pages (GPA 0x0 - 0xD0000) */
+    /* Write dirty pages from slot 0 */
     for (size_t i = 0; i < slot0_pages; i++) {
         if (bitmap0[i / 64] & (1ULL << (i % 64))) {
             uint32_t page_idx = (uint32_t)i;
@@ -360,12 +360,12 @@ static int migrate_write_dirty(int fd, int vmfd, void *mem, size_t mem_size,
         }
     }
 
-    /* Write slot 1 dirty pages (GPA 0xD1000 - end) */
+    /* Write dirty pages from slot 1 */
     for (size_t i = 0; i < slot1_pages; i++) {
         if (bitmap1[i / 64] & (1ULL << (i % 64))) {
-            uint32_t page_idx = (uint32_t)((0xD1000 / 4096) + i);
+            uint32_t page_idx = (uint32_t)((MEM_SLOT1_GPA / 4096) + i);
             write(fd, &page_idx, sizeof(page_idx));
-            write(fd, (char *)mem + 0xD1000 + i * 4096, 4096);
+            write(fd, (char *)mem + MEM_SLOT1_GPA + i * 4096, 4096);
         }
     }
 
@@ -415,14 +415,14 @@ int migrate_precopy(const char *path, int vmfd, void *mem, size_t mem_size,
 
     /* Reset dirty log before full copy (so iterations get delta only) */
     {
-        size_t slot0_pages = 0xD0000 / 4096;
+        size_t slot0_pages = MEM_SLOT0_SIZE / 4096;
         size_t slot0_bitmap_sz = (slot0_pages + 63) / 64 * 8;
         uint64_t *bm0 = calloc(1, slot0_bitmap_sz);
-        size_t slot1_pages = (mem_size - 0xD1000) / 4096;
+        size_t slot1_pages = (mem_size - MEM_SLOT1_GPA) / 4096;
         size_t slot1_bitmap_sz = (slot1_pages + 63) / 64 * 8;
         uint64_t *bm1 = calloc(1, slot1_bitmap_sz);
-        struct kvm_dirty_log dl0 = { .slot = 0, .dirty_bitmap = bm0 };
-        struct kvm_dirty_log dl1 = { .slot = 1, .dirty_bitmap = bm1 };
+        struct kvm_dirty_log dl0 = { .slot = MEM_SLOT0_ID, .dirty_bitmap = bm0 };
+        struct kvm_dirty_log dl1 = { .slot = MEM_SLOT1_ID, .dirty_bitmap = bm1 };
         ioctl(vmfd, KVM_GET_DIRTY_LOG, &dl0);
         ioctl(vmfd, KVM_GET_DIRTY_LOG, &dl1);
         free(bm0);
