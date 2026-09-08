@@ -85,6 +85,13 @@ void pci_config_write(struct pci_device *dev, uint8_t offset, uint32_t value, in
     fprintf(stderr, "[pci] config write offset=0x%02x ← 0x%x (len=%d)\n",
         offset, value, len);
 
+    /* Reject invalid widths and accesses that would run past config[]
+     * (e.g. a 4-byte write at offset 0xFF). Compare without adding. */
+    if (len != 1 && len != 2 && len != 4)
+        return;
+    if ((size_t)len > sizeof(dev->config) - offset)
+        return;
+
     if (offset == 0x10) {
         /* BAR0 write — handle size probing */
         if (value == 0xFFFFFFFF) {
@@ -117,6 +124,12 @@ uint32_t pci_config_read(struct pci_device *dev, uint8_t offset, int len)
         else
             return 0xFF;
     }
+
+    /* Reject invalid widths and reads that would run past config[]. */
+    if (len != 1 && len != 2 && len != 4)
+        return 0xFFFFFFFF;
+    if ((size_t)len > sizeof(dev->config) - offset)
+        return 0xFFFFFFFF;
 
     uint32_t value = 0;
     if (len == 4)
@@ -158,11 +171,12 @@ void pci_dev_mmio_write(struct pci_device *dev, uint64_t offset, uint32_t value)
     switch (offset) {
     case PCI_DEV_REG_DOORBELL: {
         /* Read descriptor from guest RAM */
-        if (dev->desc_addr + sizeof(struct dma_desc) > dev->ram_size)
+        if (dev->desc_addr >= dev->ram_size ||
+            sizeof(struct dma_desc) > dev->ram_size - dev->desc_addr)
             break;
         struct dma_desc desc;
         memcpy(&desc, dev->ram + dev->desc_addr, sizeof(desc));
-        if (desc.addr + desc.len > dev->ram_size)
+        if (desc.addr >= dev->ram_size || desc.len > dev->ram_size - desc.addr)
             break;
 
         if (desc.flags == 0) {
@@ -208,14 +222,30 @@ void pci_dev_mmio_write(struct pci_device *dev, uint64_t offset, uint32_t value)
 
 /* Read MSI-X table entry — guest driver reads to check vector configuration */
 uint32_t pci_msix_read(struct pci_device *dev, uint64_t offset) {
+    /* Reject accesses outside the MSI-X table or not 4-byte aligned. */
+    if (offset < PCI_MSIX_TABLE_OFFSET)
+        return 0xFFFFFFFF;
+
+    uint64_t rel = offset - PCI_MSIX_TABLE_OFFSET;
+    if ((rel & 3) != 0 || rel + sizeof(uint32_t) > sizeof(dev->msix_table))
+        return 0xFFFFFFFF;
+
     uint32_t *table = (uint32_t *)dev->msix_table;
-    return table[(offset - PCI_MSIX_TABLE_OFFSET) / 4];
+    return table[rel / sizeof(uint32_t)];
 }
 
 /* Write MSI-X table entry — guest driver programs addr/data/ctrl for each vector */
 void pci_msix_write(struct pci_device *dev, uint64_t offset, uint32_t value) {
+    /* Reject accesses outside the MSI-X table or not 4-byte aligned. */
+    if (offset < PCI_MSIX_TABLE_OFFSET)
+        return;
+
+    uint64_t rel = offset - PCI_MSIX_TABLE_OFFSET;
+    if ((rel & 3) != 0 || rel + sizeof(uint32_t) > sizeof(dev->msix_table))
+        return;
+
     uint32_t *table = (uint32_t *)dev->msix_table;
-    table[(offset - PCI_MSIX_TABLE_OFFSET) / 4] = value;
+    table[rel / sizeof(uint32_t)] = value;
     fprintf(stderr, "[pci-msix] table write offset=0x%lx val=0x%x\n",
             (unsigned long)offset, value);
 }
