@@ -1,8 +1,9 @@
-# Step 21: VM snapshot — save and restore full VM state
+# Step 21: VM snapshot — save and restore VM state
 
 ## Goal
 
-Save the entire VM state (CPU registers, device state, guest RAM) to a file with `Ctrl-A s`, and restore it with `./microkvm --restore snapshot.bin` to resume execution from the exact saved point.
+Save the VM state (CPU registers, device state, guest RAM) to a file with `Ctrl-A s`, and restore it with `./microkvm --restore snapshot.bin` to resume execution from the exact saved point.
+Here the device state covers the UART and virtio-mmio; PCI/MSI-X/hotplug state (added in Step 23 and later) is not part of the snapshot format.
 
 ## Background
 
@@ -207,7 +208,7 @@ Starting guest...
 bar
 ```
 
-The shell variable `FOO` survives the save/restore cycle — proof that the entire guest state (CPU + memory + devices) was correctly preserved and restored.
+The shell variable `FOO` survives the save/restore cycle, demonstrating that the guest's execution and memory state were preserved across the snapshot.
 
 ## Key insight
 

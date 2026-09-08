@@ -26,8 +26,11 @@ static const uint32_t snap_msr_list[SNAP_NUM_MSRS] = {
 };
 
 /*
- * Save CPU and device state to an open fd (without header or RAM).
+ * Save vCPU and supported device state to an open fd (without header or RAM).
  * Shared by snap_save() and migrate_stop_and_copy().
+ *
+ * Device state currently includes UART and virtio-mmio only.
+ * PCI/MSI-X/hotplug state is not included in the snapshot format.
  */
 static void save_cpu_state(int fd, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio)
@@ -159,8 +162,11 @@ void dump_cpu_state(int vcpufd)
 }
 
 /*
- * Save full VM state to file.
+ * Save the VM state supported by this snapshot format to file.
  * Called after vCPU has stopped (Ctrl-A s → stop_requested → join).
+ *
+ * This includes vCPU/KVM state, RAM, UART, and virtio-mmio state.
+ * PCI/MSI-X/hotplug state is not included in the current snapshot format.
  */
 int snap_save(const char *path, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,

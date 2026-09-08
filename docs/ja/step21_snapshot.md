@@ -2,7 +2,8 @@
 
 ## 目的
 
-`Ctrl-A s` で VM の全状態（CPU レジスタ、デバイス状態、guest RAM）をファイルに保存し、`./microkvm --restore snapshot.bin` で復元して保存した瞬間から実行を再開する。
+`Ctrl-A s` で VM の状態（CPU レジスタ、デバイス状態、guest RAM）をファイルに保存し、`./microkvm --restore snapshot.bin` で復元して保存した瞬間から実行を再開する。
+ここでのデバイス状態は UART と virtio-mmio を対象とし、PCI/MSI-X/hotplug（Step 23 以降）は snapshot 形式には含まない。
 
 ## 背景
 
@@ -207,7 +208,7 @@ Starting guest...
 bar
 ```
 
-シェル変数 `FOO` が save/restore サイクルを生き残っている — guest の全状態（CPU + メモリ + デバイス）が正しく保存・復元された証拠。
+シェル変数 `FOO` が save/restore サイクル後も残っていることで、guest の実行状態とメモリ状態が snapshot をまたいで保持されたことを確認できる。
 
 ## 重要な知見
 
