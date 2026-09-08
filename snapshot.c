@@ -104,8 +104,15 @@ static void save_cpu_state(int fd, int vcpufd, int vmfd,
  * Step 40.2: Dump KVM-visible guest state in human-readable form.
  * Read-only observation path — uses the SAME KVM_GET_* ioctls as
  * save_cpu_state(), but prints instead of writing to a file.
- * Each field printed here is what KVM exposes of the guest's VMCS
- * guest-state area (correlated to VMCS fields in Step 40.3).
+ *
+ * What we print is KVM's *logical* view of the vCPU (the values returned
+ * by KVM_GET_REGS / KVM_GET_SREGS), not raw VMCS fields. Many of these
+ * correspond to VMCS guest-state fields, but the mapping is not 1:1:
+ * general-purpose registers are not VMCS guest-state fields and are
+ * maintained by KVM's software vCPU state across VM exits/entries, and
+ * control registers can differ from the hardware VMCS fields due to VMX
+ * CR0/CR4 guest/host masks and read shadows. Step 40.3 correlates the
+ * fields that do map to the VMCS.
  */
 void dump_cpu_state(int vcpufd)
 {
@@ -117,7 +124,10 @@ void dump_cpu_state(int vcpufd)
 
     fprintf(stderr, "\n=== guest state dump (KVM-visible) ===\n");
 
-    /* --- control flow / GPRs (→ VMCS GUEST_RIP/RSP/RFLAGS) --- */
+    /* --- control flow + GPRs ---
+     * RIP/RSP/RFLAGS correspond to VMCS GUEST_RIP/RSP/RFLAGS.
+     * RAX/RBX/RCX/RDX are not VMCS guest-state fields; KVM maintains
+     * the GPR state in software. */
     fprintf(stderr, "RIP    = 0x%016llx\n", (unsigned long long)regs.rip);
     fprintf(stderr, "RSP    = 0x%016llx\n", (unsigned long long)regs.rsp);
     fprintf(stderr, "RFLAGS = 0x%016llx\n", (unsigned long long)regs.rflags);
@@ -126,7 +136,10 @@ void dump_cpu_state(int vcpufd)
     fprintf(stderr, "RCX=0x%016llx RDX=0x%016llx\n",
             (unsigned long long)regs.rcx, (unsigned long long)regs.rdx);
 
-    /* --- control registers (→ VMCS GUEST_CR0/CR3/CR4, GUEST_IA32_EFER) --- */
+    /* --- control registers ---
+     * These correspond to VMCS GUEST_CR0/CR3/CR4 and GUEST_IA32_EFER, but
+     * KVM's logical CR0/CR4 may differ from the raw VMCS fields because of
+     * VMX guest/host masks and read shadows. */
     fprintf(stderr, "CR0    = 0x%016llx\n", (unsigned long long)sregs.cr0);
     fprintf(stderr, "CR3    = 0x%016llx\n", (unsigned long long)sregs.cr3);
     fprintf(stderr, "CR4    = 0x%016llx\n", (unsigned long long)sregs.cr4);
@@ -134,7 +147,7 @@ void dump_cpu_state(int vcpufd)
             (unsigned long long)sregs.efer,
             (unsigned long long)((sregs.efer >> 10) & 1));
 
-    /* --- segments CS/SS (mapped to VMCS GUEST_CS and GUEST_SS fields) --- */
+    /* --- segments CS/SS (correspond to VMCS GUEST_CS and GUEST_SS fields) --- */
     fprintf(stderr, "CS: sel=0x%04x base=0x%llx limit=0x%x type=0x%x db=%u l=%u\n",
             sregs.cs.selector, (unsigned long long)sregs.cs.base,
             sregs.cs.limit, sregs.cs.type, sregs.cs.db, sregs.cs.l);
