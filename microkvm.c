@@ -38,6 +38,7 @@ static int use_ioeventfd = 0;   /* 0=Step15 style, 1=Step17 style */
 static int use_irqfd = 0;       /* 0=Step16 style, 1=Step18 style */
 
 static volatile sig_atomic_t stop_requested;
+static volatile sig_atomic_t snapshot_requested;    /* Ctrl-A s: save snapshot and keep running */
 static volatile sig_atomic_t dump_requested;   /* Step 40.2: Ctrl-A p → vCPU thread dumps state */
 
 static void sigint_handler(int sig)
@@ -346,7 +347,7 @@ static void *stdin_thread(void *arg) {
             }
             if (c == 's') {
                 fprintf(stderr, "\n[monitor] saving snapshot...\n");
-                stop_requested = 1;
+                snapshot_requested = 1;
                 continue;
             }
             if (c == 'm') {
@@ -422,6 +423,11 @@ static void *vcpu_thread(void *arg) {
     for (;;) {
         if (stop_requested)
             break;
+        if (snapshot_requested) {
+            snap_save("snapshot.bin", vcpu->fd, g_vmfd, &uart, &virtio_dev,
+                virtio_dev.ram, GUEST_MEM_SIZE);
+            snapshot_requested = 0;
+        }
         if (dump_requested) {
             dump_cpu_state(vcpu->fd);
             dump_requested = 0;
@@ -950,9 +956,6 @@ int main(int argc, char *argv[]) {
     if (g_migrate_active) {
         migrate_stop_and_copy(&g_migrate_ctx, vcpus[0].fd, vmfd,
             &uart, &virtio_dev, mem, GUEST_MEM_SIZE);
-    } else {
-        snap_save("snapshot.bin", vcpus[0].fd, vmfd, &uart, &virtio_dev,
-            mem, GUEST_MEM_SIZE);
     }
 
     /* Print exit counts and latency stats (benchmark report) */
