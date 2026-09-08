@@ -2,13 +2,12 @@
 
 # microkvm
 
-A step-by-step KVM-based hypervisor for learning virtualization internals.
-microkvm is an educational hypervisor built directly on top of the Linux KVM API.
+microkvm is a step-by-step educational VMM built directly on the Linux KVM API to learn virtualization internals.
 
 Each step introduces exactly one new virtualization concept, starting from a minimal guest that executes `hlt` and gradually evolving toward a full Linux boot, virtio I/O, and live migration.
 By step 11, microkvm boots a real Linux kernel and provides an interactive shell over an emulated 8250 serial console. From step 12 onward, the guest stays fixed and the VMM itself evolves - mirroring real-world hypervisor development.
 
-Each step is intentionally minimal and self-contained. Every VM exit can be traced and inspected.
+Each step is intentionally minimal and self-contained. VM exits can be observed through KVM tracing and correlated with userspace-visible exits.
 
 Unlike production VMMs such as QEMU, microkvm intentionally prioritizes readability, traceability, and incremental learning over performance.
 
@@ -29,7 +28,7 @@ Unlike production VMMs such as QEMU, microkvm intentionally prioritizes readabil
 - Exit reduction techniques (ioeventfd, irqfd)
 - EPT/MMU internals and demand paging observation
 - Dirty page tracking (`KVM_GET_DIRTY_LOG`)
-- VM snapshot (consistent CPU/device/memory state capture and restore)
+- VM snapshot and restore
 - Live migration (dirty logging, iterative pre-copy, downtime reduction)
 - PCI Configuration Mechanism #1 (CF8/CFC port I/O)
 - BAR probing and MMIO device register access
@@ -42,29 +41,26 @@ Unlike production VMMs such as QEMU, microkvm intentionally prioritizes readabil
 - MSI-X interrupt handling (`pci_alloc_irq_vectors`, `request_irq`)
 - Follow VM exits through Linux KVM source code
 - Trace KVM internals with ftrace and perf
-- Understand VMCS and EPT at the hardware level
+- Understand VMCS, EPT, and VM-execution controls at the hardware-virtualization level
 
 ## Why microkvm?
 
 QEMU is production-grade and feature-rich. microkvm intentionally trades completeness for readability. Each step introduces exactly one concept, making every VM exit and device interaction easy to trace and understand.
 
-## Current Status
+## Scope
 
-- ✅ **Part 1: Build a Hypervisor**
-  - ✅ Phase A: Basics (Step 1–8)
-  - ✅ Phase B: Linux Boot (Step 9–11)
-  - ✅ Phase C: Virtio and Exit Reduction (Step 12–18)
-  - ✅ Phase D: Memory State Management (Step 19–22)
-  - ✅ Phase E: PCI Device Model (Step 23–27)
-  - ✅ Phase F: Linux PCI Driver (Step 28–31)
-- 🔲 **Part 2: Understand KVM Through VM Exits** (Step 32–39)
-- 🔲 **Part 3: Understand Hardware Virtualization** (Step 40–42)
+microkvm is an educational VMM intended for a cooperative Linux guest. It implements basic correctness checks but is not designed as a hardened security boundary for untrusted guests.
 
 ## Steps
 
-Each step adds exactly one concept. Every step is tagged in git.
+Each step adds exactly one concept. Part 1 steps are code milestones and are tagged in git.
+Part 2 is an observation/documentation phase and Part 3 mixes small observation tools with source-reading, so not every step has a tag.
 
-## Part 1: Build a Hypervisor (Step 1–31)
+## Part 1: Build a KVM-based VMM (Step 1–31)
+
+> **Part 1 is the build phase. Each step adds one working feature to the VMM,
+> from a minimal `hlt` guest up to Linux boot, virtio I/O, live migration, and a
+> PCI device with its Linux driver.**
 
 ### Phase A: Basics (Step 1–8)
 
@@ -116,7 +112,7 @@ Each step adds exactly one concept. Every step is tagged in git.
 |------|---------|----------------|
 | 19 | KVM MMU stats explorer | EPT page-fault counters, demand paging observation |
 | 20 | Dirty page tracking | `KVM_MEM_LOG_DIRTY_PAGES` + `KVM_GET_DIRTY_LOG` |
-| 21 | VM snapshot | Full CPU/device/memory state restore (regs, sregs, FPU, MSRs, LAPIC, PIT, kvmclock) |
+| 21 | VM snapshot | CPU, memory, UART, and virtio-mmio state restore (regs, sregs, FPU, MSRs, LAPIC, PIT, kvmclock) |
 | 22 | Live migration simulator | Iterative pre-copy + stop-and-copy with downtime measurement |
 
 **Example Results (Step 22 complete)**
@@ -162,6 +158,10 @@ Live migration (Step 22):
 
 ## Part 2: Understand KVM Through VM Exits (Step 32–39)
 
+> **Part 2 is an observation/documentation phase. It does not add VMM features;
+> the deliverables are traces, source-reading notes, and behavioral explanations
+> comparing microkvm with Linux KVM.**
+
 | Step | Concept | What You Learn |
 |------|---------|----------------|
 | 32 | Observe VM exits | perf kvm, exit statistics, frequency |
@@ -169,21 +169,26 @@ Live migration (Step 22):
 | 34 | Trace KVM internals | ftrace, KVM tracepoints |
 | 35 | The KVM exit pipeline | VM Entry → Guest → VM Exit → vmx_handle_exit() → dispatch → handler → VM Entry |
 | 36 | IRQ exit | How KVM delivers interrupts (LAPIC, posted interrupts) — cf. Step 7 |
-| 37 | MMIO exit | How KVM handles EPT violations for MMIO — cf. Step 5 |
+| 37 | MMIO exit | How KVM handles MMIO-related faults and emulation paths — cf. Step 5 |
 | 38 | MSR exit | How KVM uses MSR bitmap and emulation — cf. Step 8 |
-| 39 | CPUID exit | How KVM filters CPUID |
+| 39 | CPUID exit | How KVM handles and virtualizes guest CPUID |
 
-## Part 3: Understand Hardware Virtualization (Step 40–42)
+## Part 3: Understand Hardware Virtualization (Step 40–42 + Capstone)
 
-| Step | Concept | What You Learn |
-|------|---------|----------------|
-| 40 | VMCS explorer | VMCS field dump and analysis |
-| 41 | EPT explorer | EPT table walk visualization |
-| 42 | VM entry/exit controls | VMCS control field experiments |
+> **Part 3 explores VT-x through the interfaces KVM already exposes. KVM itself is
+> not modified; VMCS/EPT behavior is observed indirectly through KVM APIs and
+> tracepoints, then correlated with KVM source and the Intel SDM.**
+
+| Step | Topic | What You Learn |
+|------|-------|----------------|
+| 40 | VM entry/exit state | Correlate KVM-visible guest state with VMCS state and understand the observation boundary |
+| 41 | EPT and guest memory | Trace GPA → memslot → host backing and observe RAM faults vs MMIO behavior |
+| 42 | VM-execution controls | Explain why CPUID, HLT, and RDMSR cause VM exits using three interception models |
+| Capstone | RDMSR 0x1b end-to-end | Follow one instruction across guest → VMX → KVM → guest and explain why `KVM_RUN` does not return to userspace for that exit |
 
 ## Navigating Steps
 
-Each step is tagged in git. To view the code at any step:
+Part 1 code milestones are tagged in git:
 
 ```bash
 git checkout step1    # view Step 1 code
@@ -191,6 +196,8 @@ git checkout step11   # view Linux boot milestone
 git checkout step22   # view live migration
 git checkout step27   # view PCI hotplug
 git checkout step31   # view Linux PCI driver (MSI-X)
+git checkout step40   # view KVM-visible guest state dump
+git checkout step41   # view memory slot explorer
 git checkout main     # return to latest
 ```
 
@@ -199,6 +206,9 @@ To see what changed between steps:
 ```bash
 git diff step20..step21   # what snapshot added
 ```
+
+Part 2 (Step 32–39) and Step 42 do not add VMM features — they are observation
+and source-reading. Their write-ups live under `docs/` rather than a git tag.
 
 ## Building
 
@@ -224,17 +234,23 @@ For Phase B+ (Linux boot), place `bzImage` and `initramfs.gz` in the same direct
 | `Ctrl-A s` | Save VM snapshot |
 | `Ctrl-A m` | Start live migration |
 | `Ctrl-A h` | Toggle PCI hotplug device |
+| `Ctrl-A p` | Print KVM-visible guest state |
+| `Ctrl-A e` | Explore memory slots: GPA → slot → backing VA |
 
 ## Requirements
 
 - Linux with KVM support (`/dev/kvm`)
-- x86_64 CPU with VT-x (Intel) or SVM (AMD)
+- x86_64 Linux host. Part 3 specifically follows Intel VT-x/VMX terminology (VMCS, EPT, VM-execution controls) and expects an Intel VT-x-capable host for direct correspondence with the documented flow.
 - GCC, GNU Make
 - `bzImage` + `initramfs.gz` for Step 10+
 
+## Out of Scope
+
+Direct VMCS/EPT instrumentation, execution-control mutation, and a standalone VMX implementation are intentionally outside microkvm's completed learning path.
+
 ## License
 
-MIT
+Released under the [MIT License](LICENSE).
 
 ## References
 
