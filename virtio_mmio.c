@@ -51,6 +51,10 @@ int virtio_console_rx(struct virtio_mmio_dev *dev, const uint8_t *data, size_t l
     uint8_t *ram = dev->ram;
     size_t ram_size = dev->ram_size;
 
+    /* Guard against division by zero. */
+    if (vq->num == 0)
+        return -1;
+
     uint64_t desc_base  = vring_desc_addr(dev, qidx);
     uint64_t avail_base = vring_avail_addr(dev, qidx);
     uint64_t used_base  = vring_used_addr(dev, qidx);
@@ -82,9 +86,9 @@ int virtio_console_rx(struct virtio_mmio_dev *dev, const uint8_t *data, size_t l
     if (!(desc.flags & VRING_DESC_F_WRITE))
         return -1;
 
-    /* Write data into guest buffer */
+    /* Overflow-safe bounds check */
     size_t copy_len = len < desc.len ? len : desc.len;
-    if (desc.addr + copy_len > ram_size)
+    if (desc.addr >= ram_size || copy_len > ram_size - desc.addr)
         return -1;
 
     memcpy(ram + desc.addr, data, copy_len);
@@ -124,6 +128,10 @@ void virtio_console_tx(struct virtio_mmio_dev *dev,
     int qidx = 1;
     struct virtqueue_state *vq = &dev->vqs[qidx];
 
+    /* Guard against division by zero. */
+    if (vq->num == 0)
+        return;
+
     uint64_t desc_base = vring_desc_addr(dev, qidx);
     uint64_t avail_base = vring_avail_addr(dev, qidx);
     uint64_t used_base = vring_used_addr(dev, qidx);
@@ -152,9 +160,10 @@ void virtio_console_tx(struct virtio_mmio_dev *dev,
             struct vring_desc desc;
             memcpy(&desc, ram + desc_base + cur * 16, sizeof(desc));
 
-            /* TX: device reads from buffer (flags should NOT have WRITE) */
+            /* TX: device reads from buffer (flags should NOT have WRITE).
+             * Overflow-safe bounds check. */
             if (!(desc.flags & VRING_DESC_F_WRITE)) {
-                if (desc.addr + desc.len <= ram_size) {
+                if (desc.addr < ram_size && desc.len <= ram_size - desc.addr) {
                     write(STDOUT_FILENO, ram + desc.addr, desc.len);
                 }
             }
