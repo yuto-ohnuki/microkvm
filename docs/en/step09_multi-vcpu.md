@@ -172,8 +172,8 @@ Starting guest...
 [vCPU 0][MMIO write @ 0xd0000] M
 [vCPU 0][MMIO read  @ 0xd0000] returning 2
 [vCPU 0][PIO out port 0x10] 2
-[vCPU 0][MSR write] 0x4b564d00 = 0x42
-[vCPU 0][MSR read] 0x4b564d00 -> 0x42
+[vCPU 0][MSR write] 0x20000000 = 0x42
+[vCPU 0][MSR read] 0x20000000 -> 0x42
 [vCPU 0][PIO out port 0x10] r
 [vCPU 0][PIO out port 0x10] I
 [vCPU 0] halted.

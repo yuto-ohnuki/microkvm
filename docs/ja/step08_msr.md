@@ -22,7 +22,7 @@ Model-Specific Register は専用命令 (`wrmsr` / `rdmsr`) でアクセスす�
 
 16進接頭辞 `0x4B564D` は ASCII 文字列 "KVM" に対応する。KVM はこの範囲をシンセティック (合成) ハイパーバイザー定義 MSR 用に予約している。
 
-MSR は**準仮想化**の主要メカニズム — ゲストとハイパーバイザーは実ハードウェアに存在しないシンセティック MSR を通じて通信できる。KVM は kvmclock などの機能に `0x4B564D00` 範囲を使用。
+MSR は**準仮想化**の主要メカニズム — ゲストとハイパーバイザーは実ハードウェアに存在しないシンセティック MSR を通じて通信できる。KVM は `0x4B564D00`–`0x4B564DFF` を KVM 固有の synthetic MSR 用に予約しており、kvmclock などで使用する。この実験では microkvm は `0x20000000` を private synthetic MSR として使用する。この番号は教材用に任意に選んだものであり、architectural MSR や標準化された hypervisor ABI ではない。
 
 ### デフォルトの KVM 動作
 
@@ -64,15 +64,15 @@ VMM (microkvm.c)                         Guest (guest.S)
 ────────────────                         ───────────────
 KVM_ENABLE_CAP(USER_SPACE_MSR)
 KVM_X86_SET_MSR_FILTER:
-  deny MSR 0x4B564D00
+  deny MSR 0x20000000
                                          [ロングモード]
-                                           mov ecx, 0x4B564D00
+                                           mov ecx, 0x20000000
                                            mov eax, 0x42
                                            xor edx, edx
                                            wrmsr
                                                 │
 KVM_EXIT_X86_WRMSR                              ▼
-  run->msr.index = 0x4B564D00
+  run->msr.index = 0x20000000
   run->msr.data  = 0x42
   msr_store = 0x42
   run->msr.error = 0
@@ -80,7 +80,7 @@ ioctl(KVM_RUN)
                                            rdmsr
                                                 │
 KVM_EXIT_X86_RDMSR                              ▼
-  run->msr.index = 0x4B564D00
+  run->msr.index = 0x20000000
   run->msr.data = msr_store (0x42)
   run->msr.error = 0
 ioctl(KVM_RUN)
@@ -108,7 +108,7 @@ struct kvm_msr_filter filter = {
     .ranges = {{
         .flags = KVM_MSR_FILTER_READ | KVM_MSR_FILTER_WRITE,
         .nmsrs = 1,
-        .base = MSR_CUSTOM,       /* 0x4B564D00 */
+        .base = MSR_CUSTOM,       /* 0x20000000 */
         .bitmap = msr_bitmap,
     }},
 };
@@ -145,8 +145,8 @@ case KVM_EXIT_X86_RDMSR:
 ### ゲスト: wrmsr と rdmsr
 
 ```asm
-    /* wrmsr: MSR 0x4B564D00 に 0x42 を書く */
-    .byte 0xB9, 0x00, 0x4D, 0x56, 0x4B      /* mov ecx, 0x4B564D00 */
+    /* wrmsr: MSR 0x20000000 に 0x42 を書く */
+    .byte 0xB9, 0x00, 0x00, 0x00, 0x20      /* mov ecx, 0x20000000 */
     .byte 0x31, 0xD2                        /* xor edx, edx */
     .byte 0xB8, 0x42, 0x00, 0x00, 0x00      /* mov eax, 0x42 */
     .byte 0x0F, 0x30                        /* wrmsr */
@@ -171,8 +171,8 @@ Starting guest...
 [MMIO write @ 0xd0000] M
 [MMIO read  @ 0xd0000] returning 2
 [PIO out port 0x10] 2
-[MSR write] 0x4b564d00 = 0x42
-[MSR read] 0x4b564d00 -> 0x42
+[MSR write] 0x20000000 = 0x42
+[MSR read] 0x20000000 -> 0x42
 [PIO out port 0x10] r
 [PIO out port 0x10] I
 Guest halted.

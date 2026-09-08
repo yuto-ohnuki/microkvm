@@ -8,8 +8,13 @@
 #define NUM_VCPUS 1
 #define GUEST_MEM_SIZE (128 << 20)    /* 128 MB */
 
-/* Synthetic MSR for testing userspace MSR handling */
-#define MSR_CUSTOM 0x4B564D00
+/*
+ * Private synthetic MSR used only by microkvm's educational guest.
+ *
+ * This is an arbitrary experimental value, not an architectural,
+ * KVM-defined, or standardized MSR ABI.
+ */
+#define MSR_CUSTOM 0x20000000
 
 static inline uint64_t now_ns(void) {
     struct timespec ts;

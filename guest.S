@@ -72,13 +72,13 @@ long_mode:
     .byte 0xB0, '\n'                                /* mov al, '\n' */
     .byte 0xE6, 0x10                                /* out 0x10, al */
 
-    /* MSR write: wrmsr(0x4B564D00, 0x42) */
-    .byte 0xB9, 0x00, 0x4D, 0x56, 0x4B              /* mov ecx, 0x4B564D00 */
+    /* MSR write: wrmsr(0x20000000, 0x42) — private synthetic MSR */
+    .byte 0xB9, 0x00, 0x00, 0x00, 0x20              /* mov ecx, 0x20000000 */
     .byte 0x31, 0xD2                                /* xor edx, edx */
     .byte 0xB8, 0x42, 0x00, 0x00, 0x00              /* mov eax, 0x42 */
     .byte 0x0F, 0x30                                /* wrmsr */
 
-    /* MSR read:  rdmsr(0x4B564D00) */
+    /* MSR read:  rdmsr(0x20000000) */
     .byte 0x0F, 0x32                                /* rdmsr */
 
     /* Convert low byte to ASCII and output via PIO */

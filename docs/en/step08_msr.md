@@ -23,7 +23,7 @@ Model-Specific Registers are a large set of CPU registers accessed via dedicated
 
 The hexadecimal prefix `0x4B564D` corresponds to the ASCII string "KVM". KVM reserves this range for synthetic hypervisor-defined MSRs.
 
-MSRs are the primary mechanism for **paravirtualization** - the guest and hypervisor can communicate through synthetic MSRs that don't exist on real hardware. KVM uses the `0x4B564D00` range for features like kvmclock.
+MSRs are the primary mechanism for **paravirtualization** - the guest and hypervisor can communicate through synthetic MSRs that don't exist on real hardware. KVM reserves `0x4B564D00`–`0x4B564DFF` for KVM-specific synthetic MSRs, used for features such as kvmclock. For this experiment, microkvm uses `0x20000000` as an arbitrary private synthetic MSR. This value exists only for the educational experiment and is not an architectural, standardized, or stable hypervisor MSR ABI.
 
 ### Default KVM behavior
 
@@ -66,15 +66,15 @@ VMM (microkvm.c)                         Guest (guest.S)
 ────────────────                         ───────────────
 KVM_ENABLE_CAP(USER_SPACE_MSR)
 KVM_X86_SET_MSR_FILTER:
-  deny MSR 0x4B564D00
+  deny MSR 0x20000000
                                          [long mode]
-                                           mov ecx, 0x4B564D00
+                                           mov ecx, 0x20000000
                                            mov eax, 0x42
                                            xor edx, edx
                                            wrmsr
                                                 │
 KVM_EXIT_X86_WRMSR                              ▼
-  run->msr.index = 0x4B564D00
+  run->msr.index = 0x20000000
   run->msr.data  = 0x42
   msr_store = 0x42
   run->msr.error = 0
@@ -82,7 +82,7 @@ ioctl(KVM_RUN)
                                            rdmsr
                                                 │
 KVM_EXIT_X86_RDMSR                              ▼
-  run->msr.index = 0x4B564D00
+  run->msr.index = 0x20000000
   run->msr.data = msr_store (0x42)
   run->msr.error = 0
 ioctl(KVM_RUN)
@@ -110,7 +110,7 @@ struct kvm_msr_filter filter = {
     .ranges = {{
         .flags = KVM_MSR_FILTER_READ | KVM_MSR_FILTER_WRITE,
         .nmsrs = 1,
-        .base = MSR_CUSTOM,       /* 0x4B564D00 */
+        .base = MSR_CUSTOM,       /* 0x20000000 */
         .bitmap = msr_bitmap,
     }},
 };
@@ -147,8 +147,8 @@ Setting `error = 1` causes KVM to inject #GP into the guest.
 ### Guest: wrmsr and rdmsr
 
 ```asm
-    /* wrmsr: write 0x42 to MSR 0x4B564D00 */
-    .byte 0xB9, 0x00, 0x4D, 0x56, 0x4B      /* mov ecx, 0x4B564D00 */
+    /* wrmsr: write 0x42 to MSR 0x20000000 */
+    .byte 0xB9, 0x00, 0x00, 0x00, 0x20      /* mov ecx, 0x20000000 */
     .byte 0x31, 0xD2                        /* xor edx, edx */
     .byte 0xB8, 0x42, 0x00, 0x00, 0x00      /* mov eax, 0x42 */
     .byte 0x0F, 0x30                        /* wrmsr */
@@ -173,8 +173,8 @@ Starting guest...
 [MMIO write @ 0xd0000] M
 [MMIO read  @ 0xd0000] returning 2
 [PIO out port 0x10] 2
-[MSR write] 0x4b564d00 = 0x42
-[MSR read] 0x4b564d00 -> 0x42
+[MSR write] 0x20000000 = 0x42
+[MSR read] 0x20000000 -> 0x42
 [PIO out port 0x10] r
 [PIO out port 0x10] I
 Guest halted.
