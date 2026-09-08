@@ -195,4 +195,4 @@ No new files.
 
 ## Next step
 
-[Step 21: VM snapshot](step21_snapshot.md) saves the complete VM state (CPU registers + device state + RAM) to a file and restores it with `--restore`, resuming execution from the exact point where it was saved.
+[Step 21: VM snapshot](step21_snapshot.md) saves the VM state (CPU registers + device state + RAM) to a file and restores it with `--restore`, resuming execution from the exact point where it was saved.

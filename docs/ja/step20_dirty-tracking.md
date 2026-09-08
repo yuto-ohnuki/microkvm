@@ -195,4 +195,4 @@ Step 19 からの変更:
 
 ## 次のステップ
 
-[Step 21: VM snapshot](step21_snapshot.md) では VM の全状態（CPU レジスタ + デバイス状態 + RAM）をファイルに保存し、`--restore` で復元する — 保存した瞬間から実行を再開する。
+[Step 21: VM snapshot](step21_snapshot.md) では VM の状態（CPU レジスタ + デバイス状態 + RAM）をファイルに保存し、`--restore` で復元する — 保存した瞬間から実行を再開する。
