@@ -39,15 +39,26 @@ int main(void) {
         return 1;
     }
 
-    /* Register memory with KVM */
-    struct kvm_userspace_memory_region region = {
-        .slot = 0,
-        .guest_phys_addr = 0,
-        .memory_size = GUEST_MEM_SIZE,
-        .userspace_addr = (unsigned long)mem,
+    /* Register memory with KVM - split into two regions, leaving MMIO hole */
+    struct kvm_userspace_memory_region region1 = {
+        .slot = MEM_SLOT0_ID,
+        .guest_phys_addr = MEM_SLOT0_GPA,
+        .memory_size = MEM_SLOT0_SIZE,
+        .userspace_addr = (unsigned long)mem + MEM_SLOT0_GPA,
     };
-    if (ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &region) < 0) {
-        perror("KVM_SET_USER_MEMORY_REGION");
+    if (ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &region1) < 0) {
+        perror("KVM_SET_USER_MEMORY_REGION slot 0");
+        return 1;
+    }
+
+    struct kvm_userspace_memory_region region2 = {
+        .slot = MEM_SLOT1_ID,
+        .guest_phys_addr = MEM_SLOT1_GPA,
+        .memory_size = MEM_SLOT1_SIZE,
+        .userspace_addr = (unsigned long)mem + MEM_SLOT1_GPA,
+    };
+    if (ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &region2) < 0) {
+        perror("KVM_SET_USER_MEMORY_REGION slot 1");
         return 1;
     }
 
@@ -120,7 +131,16 @@ int main(void) {
             goto done;
         case KVM_EXIT_IO:
             if (run->io.port == PIO_PORT && run->io.direction == KVM_EXIT_IO_OUT) {
-                putchar(*(char *)((char *)run + run->io.data_offset));
+                char c = *(char *)((char *)run + run->io.data_offset);
+                if (c != '\n')
+                    printf("[PIO out port 0x%x] %c\n", run->io.port, c);
+            }
+            break;
+        case KVM_EXIT_MMIO:
+            if (run->mmio.phys_addr == MEM_GAP_START && run->mmio.is_write) {
+                char c = run->mmio.data[0];
+                if (c != '\n')
+                    printf("[MMIO write @ 0x%llx] %c\n", run->mmio.phys_addr, c);
             }
             break;
         default:
