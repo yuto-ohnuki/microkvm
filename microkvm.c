@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <termios.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/kvm.h>
@@ -25,6 +26,19 @@ static struct uart8250 uart;
 
 /* Virtio-mmio device */
 static struct virtio_mmio_dev virtio_dev;
+
+/* Eventfd for transmitq kick */
+static int txkick_fd = -1;
+
+/* Wait for transmitq kicks via ioeventfd and process the transmitq */
+static void *txkick_thread(void *arg) {
+    (void)arg;
+    uint64_t val;
+    while (read(txkick_fd, &val, sizeof(val)) == sizeof(val)) {
+        virtio_console_tx(&virtio_dev, virtio_dev.ram, virtio_dev.ram_size);
+    }
+    return NULL;
+}
 
 /* Terminal and stdin handling */
 static struct termios orig_termios;
@@ -201,6 +215,26 @@ int main(void) {
 
     /* Initialize virtio-mmio device */
     virtio_mmio_init(&virtio_dev);
+
+    /* Create eventfd for transmitq kick (ioeventfd) */
+    txkick_fd = eventfd(0, EFD_CLOEXEC);
+    if (txkick_fd < 0) {
+        perror("eventfd");
+        return 1;
+    }
+
+    /* Register ioeventfd: when guest writes 1 to 0xD0000050, KVM signals txkick_fd */
+    struct kvm_ioeventfd ioeventfd = {
+        .addr = VIRTIO_MMIO_BASE + VIRTIO_MMIO_QUEUE_NOTIFY,
+        .len = 4,
+        .datamatch = 1,     /* only trigger for transmitq (value==1) */
+        .fd = txkick_fd,
+        .flags = KVM_IOEVENTFD_FLAG_DATAMATCH,
+    };
+    if (ioctl(vmfd, KVM_IOEVENTFD, &ioeventfd) < 0) {
+        perror("KVM_IOEVENTFD");
+        return 1;
+    }
 
     /* Enable userspace MSR handling */
     struct kvm_enable_cap msr_cap = {
@@ -411,6 +445,13 @@ int main(void) {
         exit(1);
     }
 
+    pthread_t txkick_tid;
+    ret = pthread_create(&txkick_tid, NULL, txkick_thread, NULL);
+    if (ret != 0) {
+        fprintf(stderr, "pthread_create(txkick): %s\n", strerror(ret));
+        exit(1);
+    }
+
     for (int i = 0; i < NUM_VCPUS; i++) {
         int ret = pthread_create(&threads[i], NULL, vcpu_thread, &vcpus[i]);
         if (ret != 0) {
@@ -427,6 +468,8 @@ int main(void) {
         munmap(vcpus[i].run, mmap_size);
         close(vcpus[i].fd);
     }
+    if (txkick_fd >= 0)
+        close(txkick_fd);
     close(vmfd);
     close(kvmfd);
     munmap(mem, GUEST_MEM_SIZE);
