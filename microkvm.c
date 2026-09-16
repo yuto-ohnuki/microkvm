@@ -174,6 +174,10 @@ static void set_raw_terminal(void) {
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
 }
 
+/* Live migration status */
+static struct migrate_context g_migrate_ctx;
+static int g_migrate_active = 0;
+
 /*
  * Query and display dirty page counts for both memory slots.
  * KVM_GET_DIRTY_LOG returns a bitmap (1 bit per 4KB page) of pages
@@ -272,6 +276,15 @@ static void *stdin_thread(void *arg) {
             if (c == 's') {
                 fprintf(stderr, "\n[monitor] saving snapshot...\n");
                 snapshot_requested = 1;
+                continue;
+            }
+            if (c == 'm') {
+                fprintf(stderr, "\n[monitor] starting live migration...\n");
+                if (migrate_precopy("migration.bin", g_vmfd, virtio_dev.ram,
+                    GUEST_MEM_SIZE, &g_migrate_ctx) == 0) {
+                    g_migrate_active = 1;
+                }
+                stop_requested = 1;
                 continue;
             }
             continue;
@@ -433,6 +446,11 @@ int main(int argc, char *argv[]) {
     if (argc > 2 && strcmp(argv[1], "--restore") == 0)
         restore_path = argv[2];
 
+    /* Check for --restore-migration mode */
+    char *migrate_restore_path = NULL;
+    if (argc > 2 && strcmp(argv[1], "--restore-migration") == 0)
+        migrate_restore_path = argv[2];
+
     /* Parse runtime flags from environment:
      *   USE_IOEVENTFD=1 ./microkvm  → Step 17 style TX kick
      *   USE_IRQFD=1 ./microkvm      → Step 18 style IRQ injection */
@@ -586,7 +604,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Load bzImage */
-    if (!restore_path) {
+    if (!restore_path && !migrate_restore_path) {
         if (load_bzimage("bzImage", mem, CMDLINE) < 0) {
             return 1;
         }
@@ -717,9 +735,16 @@ int main(int argc, char *argv[]) {
     }
 
     /* Restore VM state if --restore was specified */
-    if (restore_path) {
+    if (restore_path && !migrate_restore_path) {
         if (snap_restore(restore_path, vcpus[0].fd, vmfd, &uart, &virtio_dev,
             mem, GUEST_MEM_SIZE) < 0)
+            return 1;
+    }
+
+    /* Restore from migration file if --restore-migration was specified */
+    if (migrate_restore_path) {
+        if (migrate_restore(migrate_restore_path, vcpus[0].fd, vmfd, &uart,
+            &virtio_dev, mem, GUEST_MEM_SIZE) < 0)
             return 1;
     }
 
@@ -763,6 +788,12 @@ int main(int argc, char *argv[]) {
     }
     for (int i = 0; i < NUM_VCPUS; i++) {
         pthread_join(threads[i], NULL);
+    }
+
+    /* Complete migration if triggered by Ctrl-A m */
+    if (g_migrate_active) {
+        migrate_stop_and_copy(&g_migrate_ctx, vcpus[0].fd, vmfd,
+            &uart, &virtio_dev, mem, GUEST_MEM_SIZE);
     }
 
     /* Print exit counts and latency stats (benchmark report) */
