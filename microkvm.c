@@ -172,6 +172,73 @@ static void set_raw_terminal(void) {
 }
 
 /*
+ * Query and display dirty page counts for both memory slots.
+ * KVM_GET_DIRTY_LOG returns a bitmap (1 bit per 4KB page) of pages
+ * written by the guest since the last call, then clears the bits.
+ * Called via Ctrl-A d monitor command.
+ */
+static void print_dirty_log(int vmfd, size_t mem_size) {
+    /* Slot 0: [MEM_SLOT0_GPA, MEM_GAP_START) - fixed-size low region */
+    size_t slot0_pages = MEM_SLOT0_SIZE / 4096;
+    size_t slot0_bitmap_sz = (slot0_pages + 63) / 64 * 8;
+    uint64_t *bitmap0 = calloc(1, slot0_bitmap_sz);
+
+    /* Slot 1: [MEM_SLOT1_GPA, mem_size) - depends on total VM RAM */
+    size_t slot1_pages = (mem_size - MEM_SLOT1_GPA) / 4096;
+    size_t slot1_bitmap_sz = (slot1_pages + 63) / 64 * 8;
+    uint64_t *bitmap1 = calloc(1, slot1_bitmap_sz);
+
+    if (!bitmap0 || !bitmap1) {
+        fprintf(stderr, "print_dirty_log: alloc failed\n");
+        free(bitmap0);
+        free(bitmap1);
+        return;
+    }
+
+    struct kvm_dirty_log log0 = {
+        .slot = MEM_SLOT0_ID,
+        .dirty_bitmap = bitmap0
+    };
+    struct kvm_dirty_log log1 = {
+        .slot = MEM_SLOT1_ID,
+        .dirty_bitmap = bitmap1
+    };
+
+    /* Fetch bitmap and atomically clear dirty bits */
+    if (ioctl(vmfd, KVM_GET_DIRTY_LOG, &log0) < 0)
+        perror("KVM_GET_DIRTY_LOG slot 0");
+    if (ioctl(vmfd, KVM_GET_DIRTY_LOG, &log1) < 0)
+        perror("KVM_GET_DIRTY_LOG slot 1");
+
+    /* Count dirty pages using popcount (number of set bits) */
+    char label0[64], label1[64];
+    snprintf(label0, sizeof(label0), "Slot 0 [0x%llx-0x%llx]:",
+        (unsigned long long)MEM_SLOT0_GPA, (unsigned long long)MEM_GAP_START);
+    snprintf(label1, sizeof(label1), "Slot 1 [0x%llx-0x%lx]:",
+        (unsigned long long)MEM_SLOT1_GPA, (unsigned long)mem_size);
+
+    uint64_t dirty0 = 0, dirty1 = 0;
+    for (size_t i = 0; i < slot0_bitmap_sz / 8; i++)
+        dirty0 += __builtin_popcountll(bitmap0[i]);
+    for (size_t i = 0; i < slot1_bitmap_sz / 8; i++)
+        dirty1 += __builtin_popcountll(bitmap1[i]);
+
+    uint64_t total = dirty0 + dirty1;
+
+    /* Output the result */
+    fprintf(stderr, "\n=== Dirty page report (Ctrl-A d) ===\n");
+    fprintf(stderr, "  %-28s %llu / %zu pages dirty\n",
+        label0, (unsigned long long)dirty0, slot0_pages);
+    fprintf(stderr, "  %-28s %llu / %zu pages dirty\n",
+        label1, (unsigned long long)dirty1, slot1_pages);
+    fprintf(stderr, "  %-28s %llu pages (%llu KB)\n",
+        "Total:", (unsigned long long)total, (unsigned long long)(total * 4));
+
+    free(bitmap0);
+    free(bitmap1);
+}
+
+/*
  * Read host stdin and deliver to guest.
  * Supports two modes (toggled via Ctrl-A v):
  *   - UART mode (default): characters go to ttyS0 via uart_rx()
@@ -193,6 +260,10 @@ static void *stdin_thread(void *arg) {
                     virtio_mode ? "hvc0 (virtio)" : "ttyS0 (UART)");
                 if (!virtio_mode)
                     uart_rx(&uart, '\n', g_vmfd);
+                continue;
+            }
+            if (c == 'd') {
+                print_dirty_log(g_vmfd, GUEST_MEM_SIZE);
                 continue;
             }
             continue;
@@ -470,6 +541,7 @@ int main(void) {
     /* Register memory with KVM - split into two regions, leaving MMIO hole */
     struct kvm_userspace_memory_region region1 = {
         .slot = MEM_SLOT0_ID,
+        .flags = KVM_MEM_LOG_DIRTY_PAGES,
         .guest_phys_addr = MEM_SLOT0_GPA,
         .memory_size = MEM_SLOT0_SIZE,
         .userspace_addr = (unsigned long)mem + MEM_SLOT0_GPA,
@@ -481,6 +553,7 @@ int main(void) {
 
     struct kvm_userspace_memory_region region2 = {
         .slot = MEM_SLOT1_ID,
+        .flags = KVM_MEM_LOG_DIRTY_PAGES,
         .guest_phys_addr = MEM_SLOT1_GPA,
         .memory_size = MEM_SLOT1_SIZE,
         .userspace_addr = (unsigned long)mem + MEM_SLOT1_GPA,
