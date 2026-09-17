@@ -3,11 +3,54 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 #include <time.h>
 #include <sys/ioctl.h>
 #include <linux/kvm.h>
 #include "snapshot.h"
 #include "microkvm.h"
+
+/*
+ * Socket-safe I/O helper functions — handle partial read/write.
+ * Regular files always complete in one call, but sockets may not.
+ */
+static ssize_t writen(int fd, const void *buf, size_t n)
+{
+    size_t left = n;
+    const char *p = buf;
+    while (left > 0) {
+        ssize_t nw = write(fd, p, left);
+        if (nw < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (nw == 0)
+            return -1;
+        p += nw;
+        left -= nw;
+    }
+    return (ssize_t)n;
+}
+
+static ssize_t readn(int fd, void *buf, size_t n)
+{
+    size_t left = n;
+    char *p = buf;
+    while (left > 0) {
+        ssize_t nr = read(fd, p, left);
+        if (nr < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (nr == 0)
+            return -1;
+        p += nr;
+        left -= nr;
+    }
+    return (ssize_t)n;
+}
 
 /* MSRs that define guest execution state - must be saved/restored for correct resume */
 static const uint32_t snap_msr_list[SNAP_NUM_MSRS] = {
@@ -37,43 +80,43 @@ static void save_cpu_state(int fd, int vcpufd, int vmfd,
     /* vCPU state */
     struct kvm_regs regs;
     ioctl(vcpufd, KVM_GET_REGS, &regs);
-    write(fd, &regs, sizeof(regs));
+    writen(fd, &regs, sizeof(regs));
 
     struct kvm_sregs sregs;
     ioctl(vcpufd, KVM_GET_SREGS, &sregs);
-    write(fd, &sregs, sizeof(sregs));
+    writen(fd, &sregs, sizeof(sregs));
 
     struct kvm_fpu fpu;
     ioctl(vcpufd, KVM_GET_FPU, &fpu);
-    write(fd, &fpu, sizeof(fpu));
+    writen(fd, &fpu, sizeof(fpu));
 
     struct kvm_lapic_state lapic;
     ioctl(vcpufd, KVM_GET_LAPIC, &lapic);
-    write(fd, &lapic, sizeof(lapic));
+    writen(fd, &lapic, sizeof(lapic));
 
     struct kvm_xcrs xcrs;
     ioctl(vcpufd, KVM_GET_XCRS, &xcrs);
-    write(fd, &xcrs, sizeof(xcrs));
+    writen(fd, &xcrs, sizeof(xcrs));
 
     struct kvm_vcpu_events events;
     ioctl(vcpufd, KVM_GET_VCPU_EVENTS, &events);
-    write(fd, &events, sizeof(events));
+    writen(fd, &events, sizeof(events));
 
     /* VM-wide state */
     struct kvm_pit_state2 pit_state;
     ioctl(vmfd, KVM_GET_PIT2, &pit_state);
-    write(fd, &pit_state, sizeof(pit_state));
+    writen(fd, &pit_state, sizeof(pit_state));
 
     struct kvm_irqchip chips[3];
     for (int c = 0; c < 3; c++) {
         chips[c].chip_id = c;   /* 0=PIC master, 1=PIC slave, 2=IOAPIC */
         ioctl(vmfd, KVM_GET_IRQCHIP, &chips[c]);
-        write(fd, &chips[c], sizeof(chips[c]));
+        writen(fd, &chips[c], sizeof(chips[c]));
     }
 
     struct kvm_clock_data clock;
     ioctl(vmfd, KVM_GET_CLOCK, &clock);
-    write(fd, &clock, sizeof(clock));
+    writen(fd, &clock, sizeof(clock));
 
     /* MSRs */
     struct {
@@ -84,11 +127,11 @@ static void save_cpu_state(int fd, int vcpufd, int vmfd,
     for (int i = 0; i < SNAP_NUM_MSRS; i++)
         msrs.entries[i].index = snap_msr_list[i];
     ioctl(vcpufd, KVM_GET_MSRS, &msrs);
-    write(fd, &msrs.header.nmsrs, sizeof(uint32_t));
-    write(fd, msrs.entries, sizeof(struct kvm_msr_entry) * SNAP_NUM_MSRS);
+    writen(fd, &msrs.header.nmsrs, sizeof(uint32_t));
+    writen(fd, msrs.entries, sizeof(struct kvm_msr_entry) * SNAP_NUM_MSRS);
 
     /* Device state */
-    write(fd, uart, sizeof(*uart));
+    writen(fd, uart, sizeof(*uart));
 
     struct virtio_snap vs = {
         .status = virtio->status,
@@ -99,7 +142,7 @@ static void save_cpu_state(int fd, int vcpufd, int vmfd,
         .interrupt_status = virtio->interrupt_status,
     };
     memcpy(vs.vqs, virtio->vqs, sizeof(vs.vqs));
-    write(fd, &vs, sizeof(vs));
+    writen(fd, &vs, sizeof(vs));
 }
 
 /*
@@ -125,13 +168,13 @@ int snap_save(const char *path, int vcpufd, int vmfd,
         .version = SNAP_VERSION,
         .mem_size = mem_size,
     };
-    write(fd, &hdr, sizeof(hdr));
+    writen(fd, &hdr, sizeof(hdr));
 
     /* Save CPU + device state */
     save_cpu_state(fd, vcpufd, vmfd, uart, virtio);
 
     /* Guest RAM (128MB) */
-    write(fd, mem, mem_size);
+    writen(fd, mem, mem_size);
 
     close(fd);
     fprintf(stderr, "[snapshot] saved to %s\n", path);
@@ -181,49 +224,49 @@ int snap_restore(const char *path, int vcpufd, int vmfd,
 
     /* Read all state from file (in save order) */
     struct kvm_regs regs;
-    read(fd, &regs, sizeof(regs));
+    readn(fd, &regs, sizeof(regs));
 
     struct kvm_sregs sregs;
-    read(fd, &sregs, sizeof(sregs));
+    readn(fd, &sregs, sizeof(sregs));
 
     struct kvm_fpu fpu;
-    read(fd, &fpu, sizeof(fpu));
+    readn(fd, &fpu, sizeof(fpu));
 
     struct kvm_lapic_state lapic;
-    read(fd, &lapic, sizeof(lapic));
+    readn(fd, &lapic, sizeof(lapic));
 
     struct kvm_xcrs xcrs;
-    read(fd, &xcrs, sizeof(xcrs));
+    readn(fd, &xcrs, sizeof(xcrs));
 
     struct kvm_vcpu_events events;
-    read(fd, &events, sizeof(events));
+    readn(fd, &events, sizeof(events));
 
     struct kvm_pit_state2 pit_state;
-    read(fd, &pit_state, sizeof(pit_state));
+    readn(fd, &pit_state, sizeof(pit_state));
 
     struct kvm_irqchip chips[3];
     for (int c = 0; c < 3; c++)
-        read(fd, &chips[c], sizeof(chips[c]));
+        readn(fd, &chips[c], sizeof(chips[c]));
 
     struct kvm_clock_data clock;
-    read(fd, &clock, sizeof(clock));
+    readn(fd, &clock, sizeof(clock));
 
     uint32_t nmsrs;
-    read(fd, &nmsrs, sizeof(nmsrs));
+    readn(fd, &nmsrs, sizeof(nmsrs));
     struct {
         struct kvm_msrs header;
         struct kvm_msr_entry entries[SNAP_NUM_MSRS];
     } msrs;
     msrs.header.nmsrs = nmsrs;
-    read(fd, msrs.entries, sizeof(struct kvm_msr_entry) * nmsrs);
+    readn(fd, msrs.entries, sizeof(struct kvm_msr_entry) * nmsrs);
 
-    read(fd, uart, sizeof(*uart));
+    readn(fd, uart, sizeof(*uart));
 
     struct virtio_snap vs;
-    read(fd, &vs, sizeof(vs));
+    readn(fd, &vs, sizeof(vs));
 
     /* RAM must be loaded before MSRs (KVM_SYSTEM_TIME_NEW accesses guest RAM) */
-    read(fd, mem, mem_size);
+    readn(fd, mem, mem_size);
     close(fd);
 
     /*
@@ -290,14 +333,14 @@ static int migrate_write_dirty(int fd, int vmfd, void *mem, size_t mem_size,
     for (size_t i = 0; i < slot1_bitmap_sz / 8; i++)
         dirty_count += __builtin_popcountll(bitmap1[i]);
 
-    write(fd, &dirty_count, sizeof(dirty_count));
+    writen(fd, &dirty_count, sizeof(dirty_count));
 
     /* Write dirty pages from slot 0 */
     for (size_t i = 0; i < slot0_pages; i++) {
         if (bitmap0[i / 64] & (1ULL << (i % 64))) {
             uint32_t page_idx = (uint32_t)i;
-            write(fd, &page_idx, sizeof(page_idx));
-            write(fd, (char *)mem + i * 4096, 4096);
+            writen(fd, &page_idx, sizeof(page_idx));
+            writen(fd, (char *)mem + i * 4096, 4096);
         }
     }
 
@@ -305,8 +348,8 @@ static int migrate_write_dirty(int fd, int vmfd, void *mem, size_t mem_size,
     for (size_t i = 0; i < slot1_pages; i++) {
         if (bitmap1[i / 64] & (1ULL << (i % 64))) {
             uint32_t page_idx = (uint32_t)((MEM_SLOT1_GPA / 4096) + i);
-            write(fd, &page_idx, sizeof(page_idx));
-            write(fd, (char *)mem + MEM_SLOT1_GPA + i * 4096, 4096);
+            writen(fd, &page_idx, sizeof(page_idx));
+            writen(fd, (char *)mem + MEM_SLOT1_GPA + i * 4096, 4096);
         }
     }
 
@@ -317,15 +360,25 @@ static int migrate_write_dirty(int fd, int vmfd, void *mem, size_t mem_size,
 }
 
 /* Read and apply dirty pages from migration file */
-static int migrate_read_dirty(int fd, void *mem)
+static int migrate_read_dirty(int fd, void *mem, size_t mem_size)
 {
     uint32_t dirty_count;
-    if (read(fd, &dirty_count, sizeof(dirty_count)) != sizeof(dirty_count))
+    if (readn(fd, &dirty_count, sizeof(dirty_count)) != sizeof(dirty_count))
         return -1;
+    if (dirty_count > mem_size / 4096) {
+        fprintf(stderr, "[migration] invalid dirty page count: %u\n", dirty_count);
+        return -1;
+    }
     for (uint32_t i = 0; i < dirty_count; i++) {
         uint32_t page_idx;
-        read(fd, &page_idx, sizeof(page_idx));
-        read(fd, (char *)mem + (uint64_t)page_idx * 4096, 4096);
+        if (readn(fd, &page_idx, sizeof(page_idx)) != sizeof(page_idx))
+            return -1;
+        if (page_idx >= mem_size / 4096) {
+            fprintf(stderr, "[migration] invalid page index: %u\n", page_idx);
+            return -1;
+        }
+        if (readn(fd, (char *)mem + (uint64_t)page_idx * 4096, 4096) < 0)
+            return -1;
     }
     return (int)dirty_count;
 }
@@ -334,15 +387,9 @@ static int migrate_read_dirty(int fd, void *mem)
  * Phase 1: pre-copy — runs while VM is still live (called from stdin_thread).
  * Writes header + full RAM + iterative dirty pages.
  */
-int migrate_precopy(const char *path, int vmfd, void *mem, size_t mem_size,
+int migrate_precopy(int fd, int vmfd, void *mem, size_t mem_size,
     struct migrate_context *ctx)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        perror("migrate_precopy open");
-        return -1;
-    }
-
     fprintf(stderr, "\n=== Live migration simulator ===\n");
 
     /* Write placeholder header (num_iterations updated in stop-and-copy) */
@@ -352,7 +399,7 @@ int migrate_precopy(const char *path, int vmfd, void *mem, size_t mem_size,
         .mem_size = mem_size,
         .num_iterations = 0,
     };
-    write(fd, &hdr, sizeof(hdr));
+    writen(fd, &hdr, sizeof(hdr));
 
     /* Reset dirty log before full copy (so iterations get delta only) */
     {
@@ -372,13 +419,16 @@ int migrate_precopy(const char *path, int vmfd, void *mem, size_t mem_size,
 
     /* Iteration 0: full RAM copy */
     uint32_t total_pages = (uint32_t)(mem_size / 4096);
-    write(fd, mem, mem_size);
+    writen(fd, mem, mem_size);
     fprintf(stderr, "Iteration 0: full RAM copy %u pages\n", total_pages);
 
     /* Iterative pre-copy: wait → get dirty → write dirty → repeat */
     uint32_t iter = 0;
     for (iter = 0; iter < MIGRATION_MAX_ITERS; iter++) {
         usleep(MIGRATION_INTERVAL_MS * 1000);
+
+        uint8_t phase = MIG_PHASE_DIRTY;
+        writen(fd, &phase, sizeof(phase));
 
         uint64_t dirty_count = 0;
         migrate_write_dirty(fd, vmfd, mem, mem_size, &dirty_count);
@@ -405,6 +455,9 @@ int migrate_stop_and_copy(struct migrate_context *ctx, int vcpufd, int vmfd,
     int fd = ctx->fd;
     uint64_t t1 = now_ns();
 
+    uint8_t phase = MIG_PHASE_FINAL;
+    writen(fd, &phase, sizeof(phase));
+
     /* Final dirty pages (after vCPU stopped — guaranteed consistent) */
     uint64_t final_dirty = 0;
     migrate_write_dirty(fd, vmfd, mem, mem_size, &final_dirty);
@@ -416,15 +469,15 @@ int migrate_stop_and_copy(struct migrate_context *ctx, int vcpufd, int vmfd,
     double downtime_ms = (double)(t2 - t1) / 1e6;
 
     /* Update header with final iteration count */
-    struct migrate_header hdr = {
-        .magic = MIG_MAGIC,
-        .version = MIG_VERSION,
-        .mem_size = mem_size,
-        .num_iterations = ctx->num_iterations,
-    };
-    lseek(fd, 0, SEEK_SET);
-    write(fd, &hdr, sizeof(hdr));
-
+    if (lseek(fd, 0, SEEK_SET) >= 0) {
+        struct migrate_header hdr = {
+            .magic = MIG_MAGIC,
+            .version = MIG_VERSION,
+            .mem_size = mem_size,
+            .num_iterations = ctx->num_iterations,
+        };
+        writen(fd, &hdr, sizeof(hdr));
+    }
     close(fd);
 
     fprintf(stderr, "Stop-and-copy: %llu dirty pages\n", (unsigned long long)final_dirty);
@@ -438,18 +491,12 @@ int migrate_stop_and_copy(struct migrate_context *ctx, int vcpufd, int vmfd,
  * Restore from migration file.
  * Applies base RAM, then each dirty iteration in order, then CPU/device state.
  */
-int migrate_restore(const char *path, int vcpufd, int vmfd,
+int migrate_restore(int fd, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
     void *mem, size_t mem_size)
 {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        perror("migrate_restore open");
-        return -1;
-    }
-
     struct migrate_header hdr;
-    read(fd, &hdr, sizeof(hdr));
+    readn(fd, &hdr, sizeof(hdr));
     if (hdr.magic != MIG_MAGIC || hdr.version != MIG_VERSION) {
         fprintf(stderr, "Invalid migration file\n");
         close(fd);
@@ -462,65 +509,74 @@ int migrate_restore(const char *path, int vcpufd, int vmfd,
         return -1;
     }
 
-    fprintf(stderr, "[migration] restoring from %s\n", path);
+    fprintf(stderr, "[migration] receiving state...\n");
 
     /* 1. Base RAM (iteration 0) */
-    read(fd, mem, mem_size);
+    readn(fd, mem, mem_size);
     fprintf(stderr, "[migration] base RAM loaded (%zu MB)\n", mem_size >> 20);
 
     /* 2. Apply dirty iterations (overlay on top of base) */
-    for (uint32_t i = 0; i < hdr.num_iterations; i++) {
-        int dirty = migrate_read_dirty(fd, mem);
-        fprintf(stderr, "[migration] iteration %u: applied %d dirty pages\n",
-            i + 1, dirty);
+    for (;;) {
+        uint8_t phase;
+        if (readn(fd, &phase, sizeof(phase)) != sizeof(phase))
+            return -1;
+        if (phase != MIG_PHASE_DIRTY && phase != MIG_PHASE_FINAL) {
+            fprintf(stderr, "[migration] invalid phase: %#x\n", phase);
+            return -1;
+        }
+
+        int dirty = migrate_read_dirty(fd, mem, mem_size);
+        if (dirty < 0)
+            return -1;
+        fprintf(stderr, "[migration] phase=%s: applied %d dirty pages\n",
+            phase == MIG_PHASE_FINAL ? "final" : "iter", dirty);
+
+        if (phase == MIG_PHASE_FINAL)
+            break;
     }
 
-    /* 3. Final dirty pages (stop-and-copy) */
-    int final_dirty = migrate_read_dirty(fd, mem);
-    fprintf(stderr, "[migration] final: applied %d dirty pages\n", final_dirty);
-
-    /* 4. Restore CPU/device state (same apply order as snap_restore) */
+    /* 3. Restore CPU/device state (same apply order as snap_restore) */
     struct kvm_regs regs;
-    read(fd, &regs, sizeof(regs));
+    readn(fd, &regs, sizeof(regs));
 
     struct kvm_sregs sregs;
-    read(fd, &sregs, sizeof(sregs));
+    readn(fd, &sregs, sizeof(sregs));
 
     struct kvm_fpu fpu;
-    read(fd, &fpu, sizeof(fpu));
+    readn(fd, &fpu, sizeof(fpu));
 
     struct kvm_lapic_state lapic;
-    read(fd, &lapic, sizeof(lapic));
+    readn(fd, &lapic, sizeof(lapic));
 
     struct kvm_xcrs xcrs;
-    read(fd, &xcrs, sizeof(xcrs));
+    readn(fd, &xcrs, sizeof(xcrs));
 
     struct kvm_vcpu_events events;
-    read(fd, &events, sizeof(events));
+    readn(fd, &events, sizeof(events));
 
     struct kvm_pit_state2 pit_state;
-    read(fd, &pit_state, sizeof(pit_state));
+    readn(fd, &pit_state, sizeof(pit_state));
 
     struct kvm_irqchip chips[3];
     for (int c = 0; c < 3; c++)
-        read(fd, &chips[c], sizeof(chips[c]));
+        readn(fd, &chips[c], sizeof(chips[c]));
 
     struct kvm_clock_data clock;
-    read(fd, &clock, sizeof(clock));
+    readn(fd, &clock, sizeof(clock));
 
     uint32_t nmsrs;
-    read(fd, &nmsrs, sizeof(nmsrs));
+    readn(fd, &nmsrs, sizeof(nmsrs));
     struct {
         struct kvm_msrs header;
         struct kvm_msr_entry entries[SNAP_NUM_MSRS];
     } msrs;
     msrs.header.nmsrs = nmsrs;
-    read(fd, msrs.entries, sizeof(struct kvm_msr_entry) * nmsrs);
+    readn(fd, msrs.entries, sizeof(struct kvm_msr_entry) * nmsrs);
 
-    read(fd, uart, sizeof(*uart));
+    readn(fd, uart, sizeof(*uart));
 
     struct virtio_snap vs;
-    read(fd, &vs, sizeof(vs));
+    readn(fd, &vs, sizeof(vs));
     close(fd);
 
     /* Apply in correct order (same as snap_restore) */

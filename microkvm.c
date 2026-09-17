@@ -10,6 +10,10 @@
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 #include <linux/kvm.h>
 #include "microkvm.h"
 #include "boot.h"
@@ -75,6 +79,94 @@ static uint64_t irqfd_write_count = 0;
 static uint64_t ioctl_irq_count = 0;
 static uint64_t queue_notify_rx_mmio_count = 0;
 static uint64_t queue_notify_tx_mmio_count = 0;
+
+/*
+ * Connect to a migration target and return a connected socket fd.
+ * spec format: "tcp:<ipv4>:<port>" or "tcp:<port>" (defaults to 127.0.0.1).
+ */
+static int connect_to(const char *spec)
+{
+    const char *p = spec + 4;
+    char host[256] = "127.0.0.1";
+    long port;
+
+    const char *colon = strrchr(p, ':');
+    if (colon && colon != p) {
+        size_t len = colon - p;
+        if (len >= sizeof(host))    /* host length check */
+            return -1;
+        memcpy(host, p, len);
+        host[len] = '\0';
+        port = strtol(colon + 1, NULL, 10);
+    } else {
+        port = strtol(p, NULL, 10);
+    }
+    if (port < 1 || port > 65535)     /* port range */
+        return -1;
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0)
+        return -1;
+    int one = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(port) };
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {    /* inet_pton check */
+        fprintf(stderr, "invalid address: %s\n", host);
+        close(sock);
+        return -1;
+    }
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("connect");
+        close(sock);
+        return -1;
+    }
+    return sock;
+}
+
+/*
+ * Listen on a TCP port for an incoming migration and return the
+ * accepted socket fd. spec format: "tcp:<port>".
+ */
+static int listen_on(const char *spec)
+{
+    const char *p = spec + 4;  /* skip "tcp:" */
+    long port = strtol(p, NULL, 10);
+    if (port < 1 || port > 65535)
+         return -1;
+
+    int srv = socket(AF_INET, SOCK_STREAM, 0);
+    if (srv < 0) return -1;
+
+    int one = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port = htons(port),
+    };
+
+    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(srv);
+        return -1;
+    }
+    if (listen(srv, 1) < 0) {
+        perror("listen");
+        close(srv);
+        return -1;
+    }
+    fprintf(stderr, "[migration] waiting for connection on port %ld...\n", port);
+
+    int sock = accept(srv, NULL, NULL);
+    close(srv);
+
+    if (sock >= 0) {
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    }
+    return sock;
+}
 
 /* Print exit counts and latency stats collected during the run.
  * Called on Ctrl-C (after vCPU thread exits). */
@@ -279,8 +371,19 @@ static void *stdin_thread(void *arg) {
                 continue;
             }
             if (c == 'm') {
-                fprintf(stderr, "\n[monitor] starting live migration...\n");
-                if (migrate_precopy("migration.bin", g_vmfd, virtio_dev.ram,
+                fprintf(stderr, "\n[monitor] starting live migration (file)...\n");
+                int mig_fd = open("migration.bin", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (mig_fd >= 0 && migrate_precopy(mig_fd, g_vmfd, virtio_dev.ram,
+                    GUEST_MEM_SIZE, &g_migrate_ctx) == 0) {
+                    g_migrate_active = 1;
+                }
+                stop_requested = 1;
+                continue;
+            }
+            if (c == 't') {
+                fprintf(stderr, "\n[monitor] starting live migration (socket)...\n");
+                int mig_fd = connect_to("tcp:127.0.0.1:4444");
+                if (mig_fd >= 0 && migrate_precopy(mig_fd, g_vmfd, virtio_dev.ram,
                     GUEST_MEM_SIZE, &g_migrate_ctx) == 0) {
                     g_migrate_active = 1;
                 }
@@ -451,6 +554,10 @@ int main(int argc, char *argv[]) {
     if (argc > 2 && strcmp(argv[1], "--restore-migration") == 0)
         migrate_restore_path = argv[2];
 
+    char *incoming_spec = NULL;
+    if (argc > 2 && strcmp(argv[1], "--incoming") == 0)
+        incoming_spec = argv[2];
+
     /* Parse runtime flags from environment:
      *   USE_IOEVENTFD=1 ./microkvm  → Step 17 style TX kick
      *   USE_IRQFD=1 ./microkvm      → Step 18 style IRQ injection */
@@ -604,7 +711,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Load bzImage */
-    if (!restore_path && !migrate_restore_path) {
+    if (!restore_path && !migrate_restore_path && !incoming_spec) {
         if (load_bzimage("bzImage", mem, CMDLINE) < 0) {
             return 1;
         }
@@ -735,7 +842,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Restore VM state if --restore was specified */
-    if (restore_path && !migrate_restore_path) {
+    if (restore_path && !migrate_restore_path && !incoming_spec) {
         if (snap_restore(restore_path, vcpus[0].fd, vmfd, &uart, &virtio_dev,
             mem, GUEST_MEM_SIZE) < 0)
             return 1;
@@ -743,8 +850,22 @@ int main(int argc, char *argv[]) {
 
     /* Restore from migration file if --restore-migration was specified */
     if (migrate_restore_path) {
-        if (migrate_restore(migrate_restore_path, vcpus[0].fd, vmfd, &uart,
-            &virtio_dev, mem, GUEST_MEM_SIZE) < 0)
+        int mig_fd = open(migrate_restore_path, O_RDONLY);
+        if (mig_fd < 0) {
+            perror("open migration file");
+            return 1;
+        }
+        if (migrate_restore(mig_fd, vcpus[0].fd, vmfd, &uart, &virtio_dev,
+            mem, GUEST_MEM_SIZE) < 0)
+            return 1;
+    }
+
+    /* Accept incoming migration via socket */
+    if (incoming_spec) {
+        int mig_fd = listen_on(incoming_spec);
+        if (mig_fd < 0) return 1;
+        if (migrate_restore(mig_fd, vcpus[0].fd, vmfd, &uart, &virtio_dev,
+            mem, GUEST_MEM_SIZE) < 0)
             return 1;
     }
 
