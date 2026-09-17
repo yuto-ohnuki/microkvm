@@ -151,6 +151,7 @@ static void save_cpu_state(int fd, int vcpufd, int vmfd,
  * the VM is not terminated and execution resumes afterward.
  *
  * This includes vCPU/KVM state, RAM, UART, and virtio-mmio state.
+ * PCI/MSI-X/hotplug state is not included in the current snapshot format.
  */
 int snap_save(const char *path, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
