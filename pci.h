@@ -32,11 +32,29 @@
 #define PCI_DEV_REG_STATUS      0x00
 #define PCI_DEV_REG_DOORBELL    0x04
 #define PCI_DEV_REG_RESULT      0x08
+#define PCI_DEV_REG_DESC_LO     0x0C
+#define PCI_DEV_REG_DESC_HI     0x10
+
+/*
+ * DMA descriptor — placed in guest RAM by the driver.
+ * Device reads this to know where and how much data to transfer.
+ */
+struct dma_desc {
+    uint64_t addr;
+    uint32_t len;
+    uint32_t flags;     /* 0=device reads from guest */
+};
 
 struct pci_device {
-    uint8_t config[256];       /* PCI config space (Type 0 header) */
-    uint32_t bar0_mask;        /* BAR0 size mask for probing */
-    uint32_t config_address;   /* last value written to 0xCF8 */
+    uint8_t config[256];        /* PCI config space (Type 0 header) */
+    uint32_t bar0_mask;         /* BAR0 size mask for probing */
+    uint32_t config_address;    /* last value written to 0xCF8 */
+
+    /* DMA state */
+    uint64_t desc_addr;         /* GPA of descriptor (set via DESC_LO/HI registers) */
+    uint32_t last_dma_len;      /* result of last DMA operation */
+    uint8_t *ram;               /* pointer to guest RAM (set by VMM) */
+    size_t ram_size;
 };
 
 void pci_init(struct pci_device *dev);
