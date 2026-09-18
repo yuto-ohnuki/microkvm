@@ -129,5 +129,6 @@ int migrate_stop_and_copy(struct migrate_context *ctx, int vcpufd, int vmfd,
 int migrate_restore(int fd, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
     void *mem, size_t mem_size);
+void dump_cpu_state(int vcpufd);
 
 #endif /* SNAPSHOT_H */
