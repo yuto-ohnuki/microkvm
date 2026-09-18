@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include "boot.h"
 #include "microkvm.h"
+#include "platform.h"
 
 /* Load bzImage and set up boot_params per Linux Boot Protocol */
 int load_bzimage(const char *path, void *mem, const char *cmdline)
@@ -101,5 +102,8 @@ int load_initramfs(const char *path, void *mem, uint32_t *out_size)
 
     *out_size = st.st_size;
     printf("initramfs loaded at 0x%x (%ld bytes)\n", INITRD_ADDR, st.st_size);
+
+    /* Setup MP table for IOAPIC discovery */
+    setup_mp_table(mem);
     return 0;
 }
