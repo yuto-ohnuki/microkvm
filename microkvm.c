@@ -89,9 +89,15 @@ static uint64_t queue_notify_tx_mmio_count = 0;
  */
 static int connect_to(const char *spec)
 {
+    if (strncmp(spec, "tcp:", 4) != 0) {
+        fprintf(stderr, "invalid migration spec: %s (expected tcp:[host:]port)\n", spec);
+        return -1;
+    }
+
     const char *p = spec + 4;
     char host[256] = "127.0.0.1";
     long port;
+    char *end;
 
     const char *colon = strrchr(p, ':');
     if (colon && colon != p) {
@@ -100,12 +106,18 @@ static int connect_to(const char *spec)
             return -1;
         memcpy(host, p, len);
         host[len] = '\0';
-        port = strtol(colon + 1, NULL, 10);
+        port = strtol(colon + 1, &end, 10);
     } else {
-        port = strtol(p, NULL, 10);
+        port = strtol(p, &end, 10);
     }
-    if (port < 1 || port > 65535)     /* port range */
+
+    /* strtol() also accepts leading whitespace and signs */
+    const char *port_str = (colon && colon != p) ? colon + 1 : p;
+    if (port_str[0] < '0' || port_str[0] > '9'
+        || *end != '\0' || port < 1 || port > 65535) {
+        fprintf(stderr, "invalid port in spec: %s\n", spec);
         return -1;
+    }
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0)
@@ -133,10 +145,21 @@ static int connect_to(const char *spec)
  */
 static int listen_on(const char *spec)
 {
+    if (strncmp(spec, "tcp:", 4) != 0) {
+        fprintf(stderr, "invalid migration spec: %s (expected tcp:PORT)\n", spec);
+        return -1;
+    }
+
     const char *p = spec + 4;  /* skip "tcp:" */
-    long port = strtol(p, NULL, 10);
-    if (port < 1 || port > 65535)
-         return -1;
+    char *end;
+    long port = strtol(p, &end, 10);
+
+    /* strtol() also accepts leading whitespace and signs */
+    if (p[0] < '0' || p[0] > '9'
+        || *end != '\0' || port < 1 || port > 65535) {
+        fprintf(stderr, "invalid port in spec: %s\n", spec);
+        return -1;
+    }
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) return -1;
@@ -396,21 +419,31 @@ static void *stdin_thread(void *arg) {
             if (c == 'm') {
                 fprintf(stderr, "\n[monitor] starting live migration (file)...\n");
                 int mig_fd = open("migration.bin", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (mig_fd >= 0 && migrate_precopy(mig_fd, g_vmfd, virtio_dev.ram,
+                if (mig_fd < 0) {
+                    perror("[monitor] open migration.bin");
+                } else if (migrate_precopy(mig_fd, g_vmfd, virtio_dev.ram,
                     GUEST_MEM_SIZE, &g_migrate_ctx) == 0) {
+                    /* Stop the vCPU for the final transfer */
                     g_migrate_active = 1;
+                    stop_requested = 1;
+                } else {
+                    fprintf(stderr, "[monitor] migration aborted, VM continues\n");
                 }
-                stop_requested = 1;
                 continue;
             }
             if (c == 't') {
                 fprintf(stderr, "\n[monitor] starting live migration (socket)...\n");
                 int mig_fd = connect_to("tcp:127.0.0.1:4444");
-                if (mig_fd >= 0 && migrate_precopy(mig_fd, g_vmfd, virtio_dev.ram,
+                if (mig_fd < 0) {
+                    fprintf(stderr, "[monitor] migration aborted, VM continues\n");
+                } else if (migrate_precopy(mig_fd, g_vmfd, virtio_dev.ram,
                     GUEST_MEM_SIZE, &g_migrate_ctx) == 0) {
+                    /* Stop the vCPU for the final transfer */
                     g_migrate_active = 1;
+                    stop_requested = 1;
+                } else {
+                    fprintf(stderr, "[monitor] migration aborted, VM continues\n");
                 }
-                stop_requested = 1;
                 continue;
             }
             if (c == 'h') {
@@ -710,19 +743,34 @@ int main(int argc, char *argv[]) {
     /* Ctrl-C stops the VM and prints exit/latency stats */
     signal(SIGINT, sigint_handler);
 
-    /* Check for --restore mode */
+    /* Handle a disconnected migration peer through write() errors */
+    signal(SIGPIPE, SIG_IGN);
+
+    /* Reject malformed options instead of falling back to normal boot */
     char *restore_path = NULL;
-    if (argc > 2 && strcmp(argv[1], "--restore") == 0)
-        restore_path = argv[2];
-
-    /* Check for --restore-migration mode */
     char *migrate_restore_path = NULL;
-    if (argc > 2 && strcmp(argv[1], "--restore-migration") == 0)
-        migrate_restore_path = argv[2];
-
     char *incoming_spec = NULL;
-    if (argc > 2 && strcmp(argv[1], "--incoming") == 0)
-        incoming_spec = argv[2];
+
+    if (argc > 1 && argv[1][0] == '-') {
+        if (strcmp(argv[1], "--restore") == 0 ||
+            strcmp(argv[1], "--restore-migration") == 0 ||
+            strcmp(argv[1], "--incoming") == 0) {
+            if (argc != 3) {
+                fprintf(stderr, "usage: %s [--restore|--restore-migration|--incoming <arg>]\n",
+                    argv[0]);
+                return 1;
+            }
+            if (strcmp(argv[1], "--restore") == 0)
+                restore_path = argv[2];
+            else if (strcmp(argv[1], "--restore-migration") == 0)
+                migrate_restore_path = argv[2];
+            else
+                incoming_spec = argv[2];
+        } else {
+            fprintf(stderr, "unknown option: %s\n", argv[1]);
+            return 1;
+        }
+    }
 
     /* Parse runtime flags from environment:
      *   USE_IOEVENTFD=1 ./microkvm  → Step 17 style TX kick
@@ -1092,10 +1140,14 @@ int main(int argc, char *argv[]) {
         pthread_join(threads[i], NULL);
     }
 
-    /* Complete migration if triggered by Ctrl-A m */
+    /* Send the final state after the vCPU has stopped */
+    int migrate_failed = 0;
     if (g_migrate_active) {
-        migrate_stop_and_copy(&g_migrate_ctx, vcpus[0].fd, vmfd,
-            &uart, &virtio_dev, mem, GUEST_MEM_SIZE);
+        if (migrate_stop_and_copy(&g_migrate_ctx, vcpus[0].fd, vmfd,
+            &uart, &virtio_dev, mem, GUEST_MEM_SIZE) < 0) {
+            fprintf(stderr, "[migration] stop-and-copy failed\n");
+            migrate_failed = 1;
+        }
     }
 
     /* Print exit counts and latency stats (benchmark report) */
@@ -1126,5 +1178,5 @@ int main(int argc, char *argv[]) {
     close(vmfd);
     close(kvmfd);
     munmap(mem, GUEST_MEM_SIZE);
-    return 0;
+    return migrate_failed ? 1 : 0;
 }
