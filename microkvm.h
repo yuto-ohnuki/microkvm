@@ -24,4 +24,12 @@
 #define MEM_SLOT0_SIZE  (MEM_GAP_START - MEM_SLOT0_GPA)
 #define MEM_SLOT1_SIZE  (GUEST_MEM_SIZE - MEM_SLOT1_GPA)
 
+/*
+ * Private synthetic MSR used only by microkvm's educational guest.
+ *
+ * This is an arbitrary experimental value, not an architectural,
+ * KVM-defined, or standardized MSR ABI.
+ */
+#define MSR_CUSTOM 0x20000000
+
 #endif /* MICROKVM_H */
