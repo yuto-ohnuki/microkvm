@@ -14,6 +14,15 @@
 #define VIRTIO_MMIO_VENDOR_ID           0x00C
 #define VIRTIO_MMIO_STATUS              0x070
 
+/* Feature negotiation */
+#define VIRTIO_MMIO_HOST_FEATURES       0x010
+#define VIRTIO_MMIO_HOST_FEATURES_SEL   0x014
+#define VIRTIO_MMIO_GUEST_FEATURES      0x020
+#define VIRTIO_MMIO_GUEST_FEATURES_SEL  0x024
+#define VIRTIO_MMIO_GUEST_PAGE_SIZE     0x028
+#define VIRTIO_MMIO_QUEUE_SEL           0x030
+#define VIRTIO_MMIO_QUEUE_NUM_MAX       0x034
+
 /* Magic: "virt" in little-endian */
 #define VIRTIO_MMIO_MAGIC  0x74726976
 
@@ -26,6 +35,10 @@
 /* Virtio-mmio device state */
 struct virtio_mmio_dev {
     uint32_t status;
+    uint32_t host_features_sel;
+    uint32_t guest_features;
+    uint32_t guest_page_size;
+    uint32_t queue_sel;
 };
 
 void virtio_mmio_init(struct virtio_mmio_dev *dev);
