@@ -24,6 +24,7 @@
 #include "pci.h"
 
 /* Constants and macros */
+#define MAX_MEMSLOTS 2
 #define CMDLINE "console=ttyS0 earlyprintk=serial pci=conf1 virtio_mmio.device=0x200@0xd0000000:5"
 
 /* Per-vCPU state */
@@ -53,6 +54,10 @@ static volatile sig_atomic_t dump_requested;
 
 /* VM and memory management */
 static int g_vmfd;
+
+/* Memory regions registered with KVM */
+static struct kvm_userspace_memory_region g_memslots[MAX_MEMSLOTS];
+static size_t g_nr_memslots = 0;
 
 /* Synthetic MSR backing store */
 static uint64_t msr_store = 0;
@@ -291,6 +296,19 @@ static int listen_on(const char *spec)
     return sock;
 }
 
+/* Memory inspection */
+/* Find the registered slot backing a GPA (NULL if not registered as RAM). */
+static const struct kvm_userspace_memory_region *find_memslot(uint64_t gpa)
+{
+    for (size_t i = 0; i < g_nr_memslots; i++) {
+        uint64_t start = g_memslots[i].guest_phys_addr;
+        uint64_t end   = start + g_memslots[i].memory_size;
+        if (gpa >= start && gpa < end)
+            return &g_memslots[i];
+    }
+    return NULL;
+}
+
 /*
  * Query and display dirty page counts for both memory slots.
  * KVM_GET_DIRTY_LOG returns a bitmap (1 bit per 4KB page) of pages
@@ -445,6 +463,50 @@ static void *stdin_thread(void *arg) {
             if (c == 'p') {
                 fprintf(stderr, "\n[monitor] dumping guest state (Ctrl-A p)\n");
                 dump_requested = 1;
+                continue;
+            }
+            if (c == 'e') {
+                fprintf(stderr, "\n=== KVM Memory Slots (Ctrl-A e) ===\n");
+                /* Registered KVM memory slots */
+                for (size_t i = 0; i < g_nr_memslots; i++) {
+                    uint64_t gpa  = g_memslots[i].guest_phys_addr;
+                    uint64_t sz   = g_memslots[i].memory_size;
+                    uintptr_t hva = (uintptr_t)g_memslots[i].userspace_addr;
+                    fprintf(stderr, "Slot %llu\n",
+                        (unsigned long long)g_memslots[i].slot);
+                    fprintf(stderr, "  GPA  : [0x%08llx, 0x%08llx)\n",
+                        (unsigned long long)gpa, (unsigned long long)(gpa + sz));
+                    fprintf(stderr, "  size : 0x%llx\n", (unsigned long long)sz);
+                    fprintf(stderr, "  HVA  : [0x%lx, 0x%lx)\n",
+                        (unsigned long)hva, (unsigned long)(hva + sz));
+                }
+                /* GPA gaps between consecutive slots (not registered as guest RAM).
+                 * Assumes g_memslots[] is kept in ascending GPA order. */
+                for (size_t i = 0; i + 1 < g_nr_memslots; i++) {
+                    uint64_t prev_end =
+                        g_memslots[i].guest_phys_addr + g_memslots[i].memory_size;
+                    uint64_t next_start = g_memslots[i + 1].guest_phys_addr;
+                    if (prev_end < next_start) {
+                        fprintf(stderr, "Unregistered GPA gap\n");
+                        fprintf(stderr, "  GPA  : [0x%08llx, 0x%08llx)  (no RAM memslot)\n",
+                            (unsigned long long)prev_end, (unsigned long long)next_start);
+                    }
+                }
+                /* GPA -> slot -> HVA lookup for two example addresses */
+                uint64_t queries[] = { 0x00100000, 0x000d0000 };
+                for (size_t q = 0; q < sizeof(queries)/sizeof(queries[0]); q++) {
+                    uint64_t gpa = queries[q];
+                    const struct kvm_userspace_memory_region *s = find_memslot(gpa);
+                    fprintf(stderr, "Query GPA 0x%08llx\n", (unsigned long long)gpa);
+                    if (s) {
+                        uintptr_t hva = (uintptr_t)s->userspace_addr + (gpa - s->guest_phys_addr);
+                        fprintf(stderr, "  slot : %llu\n  HVA  : 0x%lx\n",
+                            (unsigned long long)s->slot, (unsigned long)hva);
+                    } else {
+                        fprintf(stderr, "  slot : none (unregistered)\n");
+                    }
+                }
+                fprintf(stderr, "===================================\n");
                 continue;
             }
             continue;
@@ -841,29 +903,32 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Register memory with KVM - split into two regions, leaving MMIO hole */
-    struct kvm_userspace_memory_region region1 = {
+    /*
+     * Register guest RAM with KVM, leaving the MMIO hole unregistered.
+     * Keep each registered region in g_memslots[] for memory inspection.
+     */
+    g_memslots[0] = (struct kvm_userspace_memory_region){
         .slot = MEM_SLOT0_ID,
         .flags = KVM_MEM_LOG_DIRTY_PAGES,
         .guest_phys_addr = MEM_SLOT0_GPA,
         .memory_size = MEM_SLOT0_SIZE,
-        .userspace_addr = (unsigned long)mem + MEM_SLOT0_GPA,
+        .userspace_addr = (uintptr_t)mem + MEM_SLOT0_GPA,
     };
-    if (ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &region1) < 0) {
-        perror("KVM_SET_USER_MEMORY_REGION slot 0");
-        return 1;
-    }
-
-    struct kvm_userspace_memory_region region2 = {
+    g_memslots[1] = (struct kvm_userspace_memory_region){
         .slot = MEM_SLOT1_ID,
         .flags = KVM_MEM_LOG_DIRTY_PAGES,
         .guest_phys_addr = MEM_SLOT1_GPA,
         .memory_size = MEM_SLOT1_SIZE,
-        .userspace_addr = (unsigned long)mem + MEM_SLOT1_GPA,
+        .userspace_addr = (uintptr_t)mem + MEM_SLOT1_GPA,
     };
-    if (ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &region2) < 0) {
-        perror("KVM_SET_USER_MEMORY_REGION slot 1");
-        return 1;
+
+    g_nr_memslots = 0;
+    for (size_t i = 0; i < MAX_MEMSLOTS; i++) {
+        if (ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &g_memslots[i]) < 0) {
+            perror("KVM_SET_USER_MEMORY_REGION");
+            return 1;
+        }
+        g_nr_memslots++;
     }
 
     /* Load bzImage */
