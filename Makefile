@@ -8,4 +8,4 @@ guest.bin: guest.S
 	ld -m elf_i386 -Ttext 0x0 --oformat binary -o guest.bin guest.o
 
 clean:
-	rm -f microkvm guest.o guest.bin snapshot.bin
+	rm -f microkvm guest.o guest.bin snapshot.bin migration.bin

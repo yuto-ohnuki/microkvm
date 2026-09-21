@@ -73,10 +73,57 @@ struct virtio_snap {
     struct virtqueue_state vqs[VIRTQ_NUM_QUEUES];
 };
 
+/*
+ * Live migration — iterative pre-copy
+ *
+ * Algorithm:
+ *   1. Copy all RAM while VM runs (iteration 0)
+ *   2. Repeat: sleep → get dirty pages → copy only dirty pages
+ *   3. When dirty set converges below threshold, stop vCPU
+ *   4. Final stop-and-copy: remaining dirty pages + CPU/device state
+ *
+ * File format:
+ *   [migrate_header]
+ *   [full RAM]                              - iteration 0
+ *   [dirty_count + (page_idx, 4KB) × N]     - iteration 1..N
+ *   [dirty_count + (page_idx, 4KB) × N]     - final (stop-and-copy)
+ *   [CPU/device state]                      - same layout as snapshot
+ */
+#define MIG_MAGIC   0x4D4B4D47  /* "MKMG" */
+#define MIG_VERSION 1
+
+#define MIGRATION_INTERVAL_MS       100     /* delay between dirty iterations */
+#define MIGRATION_MAX_ITERS         5       /* max pre-copy iterations before stopping */
+#define MIGRATION_THRESHOLD_PAGES   50      /* stop early if dirty pages below this */
+
+/* Migration file header */
+struct migrate_header {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t mem_size;
+    uint32_t num_iterations;    /* number of dirty iterations (not counting iter 0) */
+    uint32_t pad;
+};
+
+/* Tracks in-progress migration state between precopy and stop-and-copy phases */
+struct migrate_context {
+    int fd;
+    uint32_t num_iterations;
+};
+
 int snap_save(const char *path, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
     void *mem, size_t mem_size);
 int snap_restore(const char *path, int vcpufd, int vmfd,
+    struct uart8250 *uart, struct virtio_mmio_dev *virtio,
+    void *mem, size_t mem_size);
+
+int migrate_precopy(const char *path, int vmfd, void *mem, size_t mem_size,
+    struct migrate_context *ctx);
+int migrate_stop_and_copy(struct migrate_context *ctx, int vcpufd, int vmfd,
+    struct uart8250 *uart, struct virtio_mmio_dev *virtio,
+    void *mem, size_t mem_size);
+int migrate_restore(const char *path, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
     void *mem, size_t mem_size);
 

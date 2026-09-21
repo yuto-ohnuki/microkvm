@@ -66,6 +66,10 @@ static int irq5_fd = -1;
 /* Terminal and stdin handling */
 static struct termios orig_termios;
 
+/* Live migration status */
+static struct migrate_context g_migrate_ctx;
+static int g_migrate_active = 0;
+
 /* Latency measurement state */
 static struct latency_stats tx_lat;
 static struct latency_stats irq_lat;
@@ -279,6 +283,17 @@ static void *stdin_thread(void *arg) {
                 snapshot_requested = 1;
                 continue;
             }
+            if (c == 'm') {
+                fprintf(stderr, "\n[monitor] starting live migration (file)...\n");
+                if (migrate_precopy("migration.bin", g_vmfd, virtio_dev.ram,
+                    GUEST_MEM_SIZE, &g_migrate_ctx) == 0) {
+                    /* Stop the vCPU for the final transfer */
+                    g_migrate_active = 1;
+                    stop_requested = 1;
+                } else {
+                    fprintf(stderr, "[monitor] migration aborted, VM continues\n");
+                }
+            }
             continue;
         }
 
@@ -427,14 +442,19 @@ int main(int argc, char *argv[]) {
 
     /* Reject malformed options instead of falling back to normal boot */
     char *restore_path = NULL;
+    char *migrate_restore_path = NULL;
 
     if (argc > 1 && argv[1][0] == '-') {
-        if (strcmp(argv[1], "--restore") == 0) {
+        if (strcmp(argv[1], "--restore") == 0 ||
+            strcmp(argv[1], "--restore-migration") == 0) {
             if (argc != 3) {
-                fprintf(stderr, "usage: %s [--restore <arg>]\n", argv[0]);
+                fprintf(stderr, "usage: %s [--restore|--restore-migration <arg>]\n", argv[0]);
                 return 1;
             }
-            restore_path = argv[2];
+            if (strcmp(argv[1], "--restore") == 0)
+                restore_path = argv[2];
+            else
+                migrate_restore_path = argv[2];
         } else {
             fprintf(stderr, "unknown option: %s\n", argv[1]);
             return 1;
@@ -592,7 +612,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Load bzImage */
-    if (!restore_path) {
+    if (!restore_path && !migrate_restore_path) {
         if (load_bzimage("bzImage", mem, CMDLINE) < 0) {
             return 1;
         }
@@ -723,9 +743,16 @@ int main(int argc, char *argv[]) {
     }
 
     /* Restore VM state if --restore was specified */
-    if (restore_path) {
+    if (restore_path && !migrate_restore_path) {
         if (snap_restore(restore_path, vcpus[0].fd, vmfd, &uart, &virtio_dev,
             mem, GUEST_MEM_SIZE) < 0)
+            return 1;
+    }
+
+    /* Restore from migration file if --restore-migration was specified */
+    if (migrate_restore_path) {
+        if (migrate_restore(migrate_restore_path, vcpus[0].fd, vmfd, &uart,
+            &virtio_dev, mem, GUEST_MEM_SIZE) < 0)
             return 1;
     }
 
@@ -771,6 +798,16 @@ int main(int argc, char *argv[]) {
         pthread_join(threads[i], NULL);
     }
 
+    /* Send the final state after the vCPU has stopped */
+    int migrate_failed = 0;
+    if (g_migrate_active) {
+        if (migrate_stop_and_copy(&g_migrate_ctx, vcpus[0].fd, vmfd,
+            &uart, &virtio_dev, mem, GUEST_MEM_SIZE) < 0) {
+            fprintf(stderr, "[migration] stop-and-copy failed\n");
+            migrate_failed = 1;
+        }
+    }
+
     /* Print exit counts and latency stats (benchmark report) */
     print_exit_stats();
 
@@ -800,5 +837,5 @@ int main(int argc, char *argv[]) {
     close(vmfd);
     close(kvmfd);
     munmap(mem, GUEST_MEM_SIZE);
-    return 0;
+    return migrate_failed ? 1 : 0;
 }
