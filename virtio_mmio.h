@@ -43,11 +43,16 @@
 /* Our vendor ID: "MKVM" in little-endian */
 #define VIRTIO_VENDOR_MKVM  0x4D4B564D
 
+/* Vring descriptor flags */
+#define VRING_DESC_F_NEXT   1   /* descriptor is chained */
+#define VRING_DESC_F_WRITE  2   /* device writes (RX side) */
+
 /* Per-virtqueue configuration (set by guest during queue setup) */
 struct virtqueue_state {
     uint32_t num;
     uint32_t align;
     uint32_t pfn;
+    uint16_t last_avail_idx;    /* VMM's shadow of avail idx */
 };
 
 /* Virtio-mmio device state */
@@ -58,6 +63,33 @@ struct virtio_mmio_dev {
     uint32_t guest_page_size;
     uint32_t queue_sel;
     struct virtqueue_state vqs[VIRTQ_NUM_QUEUES];
+    uint8_t *ram;
+    size_t ram_size;
+};
+
+/* virtio vring structures (legacy, little-endian) */
+struct vring_desc {
+    uint64_t addr;      /* GPA of buffer */
+    uint32_t len;       /* buffer length */
+    uint16_t flags;     /* VRING_DESC_F_NEXT, VRING_DESC_F_WRITE, etc. */
+    uint16_t next;      /* next descriptor index (if flags & NEXT) */
+};
+
+struct vring_avail {
+    uint16_t flags;
+    uint16_t idx;       /* next slot driver will fill */
+    uint16_t ring[];    /* descriptor head indices */
+};
+
+struct vring_used_elem {
+    uint32_t id;        /* descriptor head index */
+    uint32_t len;       /* bytes written by device */
+};
+
+struct vring_used {
+    uint16_t flags;
+    uint16_t idx;       /* next slot device will fill */
+    struct vring_used_elem ring[];
 };
 
 void virtio_mmio_init(struct virtio_mmio_dev *dev);
