@@ -1,7 +1,7 @@
-all: microkvm guest.bin
+all: microkvm
 
-microkvm: microkvm.c boot.c
-	gcc -O2 -Wall -o microkvm microkvm.c boot.c -lpthread
+microkvm: microkvm.c boot.c uart.c
+	gcc -O2 -Wall -o microkvm microkvm.c boot.c uart.c -lpthread
 
 guest.bin: guest.S
 	as --32 -o guest.o guest.S
