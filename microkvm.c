@@ -49,6 +49,7 @@ static int use_irqfd = 0;       /* toggle irqfd-based IRQ injection */
 /* Control requests set from signal handler / monitor keys */
 static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t snapshot_requested;
+static volatile sig_atomic_t dump_requested;
 
 /* VM and memory management */
 static int g_vmfd;
@@ -441,6 +442,11 @@ static void *stdin_thread(void *arg) {
                     "REMOVED (run: echo 1 > /sys/bus/pci/devices/0000:00:01.0/remove)");
                 continue;
             }
+            if (c == 'p') {
+                fprintf(stderr, "\n[monitor] dumping guest state (Ctrl-A p)\n");
+                dump_requested = 1;
+                continue;
+            }
             continue;
         }
 
@@ -495,6 +501,10 @@ static void *vcpu_thread(void *arg) {
             snap_save("snapshot.bin", vcpu->fd, g_vmfd, &uart, &virtio_dev,
                 virtio_dev.ram, GUEST_MEM_SIZE);
             snapshot_requested = 0;
+        }
+        if (dump_requested) {
+            dump_cpu_state(vcpu->fd);
+            dump_requested = 0;
         }
         if (ioctl(vcpu->fd, KVM_RUN, NULL) < 0) {
             perror("KVM_RUN");
