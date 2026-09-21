@@ -99,5 +99,6 @@ void virtio_mmio_write(struct virtio_mmio_dev *dev, uint64_t offset,
 uint32_t virtio_mmio_read(struct virtio_mmio_dev *dev, uint64_t offset, int len);
 
 int virtio_console_rx(struct virtio_mmio_dev *dev, const uint8_t *data, size_t len);
+void virtio_console_tx(struct virtio_mmio_dev *dev, uint8_t *ram, size_t ram_size);
 
 #endif
