@@ -90,11 +90,15 @@ struct virtio_snap {
  *   [CPU/device state]                      - same layout as snapshot
  */
 #define MIG_MAGIC   0x4D4B4D47  /* "MKMG" */
-#define MIG_VERSION 1
+#define MIG_VERSION 2
 
 #define MIGRATION_INTERVAL_MS       100     /* delay between dirty iterations */
 #define MIGRATION_MAX_ITERS         5       /* max pre-copy iterations before stopping */
 #define MIGRATION_THRESHOLD_PAGES   50      /* stop early if dirty pages below this */
+
+/* Migration stream phase markers (1 byte before each dirty-page block) */
+#define MIG_PHASE_DIRTY     0x01
+#define MIG_PHASE_FINAL     0x02
 
 /* Migration file header */
 struct migrate_header {
@@ -118,12 +122,12 @@ int snap_restore(const char *path, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
     void *mem, size_t mem_size);
 
-int migrate_precopy(const char *path, int vmfd, void *mem, size_t mem_size,
+int migrate_precopy(int fd, int vmfd, void *mem, size_t mem_size,
     struct migrate_context *ctx);
 int migrate_stop_and_copy(struct migrate_context *ctx, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
     void *mem, size_t mem_size);
-int migrate_restore(const char *path, int vcpufd, int vmfd,
+int migrate_restore(int fd, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
     void *mem, size_t mem_size);
 

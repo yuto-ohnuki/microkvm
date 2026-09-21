@@ -408,16 +408,12 @@ static int migrate_read_dirty(int fd, void *mem, size_t mem_size)
 /*
  * Phase 1: pre-copy — runs while VM is still live (called from stdin_thread).
  * Writes header + full RAM + iterative dirty pages.
+ * Closes fd on failure; on success, stores it in ctx for
+ * migrate_stop_and_copy() to close.
  */
-int migrate_precopy(const char *path, int vmfd, void *mem, size_t mem_size,
+int migrate_precopy(int fd, int vmfd, void *mem, size_t mem_size,
     struct migrate_context *ctx)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        perror("migrate_precopy open");
-        return -1;
-    }
-
     fprintf(stderr, "\n=== Live migration simulator ===\n");
 
     /* Write placeholder header (num_iterations updated in stop-and-copy) */
@@ -457,6 +453,10 @@ int migrate_precopy(const char *path, int vmfd, void *mem, size_t mem_size,
     for (iter = 0; iter < MIGRATION_MAX_ITERS; iter++) {
         usleep(MIGRATION_INTERVAL_MS * 1000);
 
+        uint8_t phase = MIG_PHASE_DIRTY;
+        if (writen(fd, &phase, sizeof(phase)) != sizeof(phase))
+            goto err;
+
         uint64_t dirty_count = 0;
         if (migrate_write_dirty(fd, vmfd, mem, mem_size, &dirty_count) < 0)
             goto err;
@@ -487,6 +487,12 @@ int migrate_stop_and_copy(struct migrate_context *ctx, int vcpufd, int vmfd,
     int fd = ctx->fd;
     uint64_t t1 = now_ns();
 
+    uint8_t phase = MIG_PHASE_FINAL;
+    if (writen(fd, &phase, sizeof(phase)) != sizeof(phase)) {
+        close(fd);
+        return -1;
+    }
+
     /* Final dirty pages (after vCPU stopped — guaranteed consistent) */
     uint64_t final_dirty = 0;
     if (migrate_write_dirty(fd, vmfd, mem, mem_size, &final_dirty) < 0) {
@@ -503,19 +509,19 @@ int migrate_stop_and_copy(struct migrate_context *ctx, int vcpufd, int vmfd,
     uint64_t t2 = now_ns();
     double downtime_ms = (double)(t2 - t1) / 1e6;
 
-    /* Update header with final iteration count */
-    struct migrate_header hdr = {
-        .magic = MIG_MAGIC,
-        .version = MIG_VERSION,
-        .mem_size = mem_size,
-        .num_iterations = ctx->num_iterations,
-    };
-    lseek(fd, 0, SEEK_SET);
-    if (writen(fd, &hdr, sizeof(hdr)) != sizeof(hdr)) {
-        close(fd);
-        return -1;
+    /* Rewrite the iteration count for seekable output only */
+    if (lseek(fd, 0, SEEK_SET) >= 0) {
+        struct migrate_header hdr = {
+            .magic = MIG_MAGIC,
+            .version = MIG_VERSION,
+            .mem_size = mem_size,
+            .num_iterations = ctx->num_iterations,
+        };
+        if (writen(fd, &hdr, sizeof(hdr)) != sizeof(hdr)) {
+            close(fd);
+            return -1;
+        }
     }
-
     close(fd);
 
     fprintf(stderr, "Stop-and-copy: %llu dirty pages\n", (unsigned long long)final_dirty);
@@ -529,32 +535,24 @@ int migrate_stop_and_copy(struct migrate_context *ctx, int vcpufd, int vmfd,
  * Restore from migration file.
  * Applies base RAM, then each dirty iteration in order, then CPU/device state.
  */
-int migrate_restore(const char *path, int vcpufd, int vmfd,
+int migrate_restore(int fd, int vcpufd, int vmfd,
     struct uart8250 *uart, struct virtio_mmio_dev *virtio,
     void *mem, size_t mem_size)
 {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        perror("migrate_restore open");
-        return -1;
-    }
-
     struct migrate_header hdr;
     if (readn(fd, &hdr, sizeof(hdr)) != sizeof(hdr))
         goto fail;
     if (hdr.magic != MIG_MAGIC || hdr.version != MIG_VERSION) {
         fprintf(stderr, "Invalid migration file\n");
-        close(fd);
-        return -1;
+        goto fail;
     }
     if (hdr.mem_size != mem_size) {
         fprintf(stderr, "Memory size mismatch: file=%llu, vm=%zu\n",
             (unsigned long long)hdr.mem_size, mem_size);
-        close(fd);
-        return -1;
+        goto fail;
     }
 
-    fprintf(stderr, "[migration] restoring from %s\n", path);
+    fprintf(stderr, "[migration] receiving state...\n");
 
     /* Base RAM (iteration 0) */
     if (readn(fd, mem, mem_size) != (ssize_t)mem_size)
@@ -562,19 +560,24 @@ int migrate_restore(const char *path, int vcpufd, int vmfd,
     fprintf(stderr, "[migration] base RAM loaded (%zu MB)\n", mem_size >> 20);
 
     /* Apply dirty iterations (overlay on top of base) */
-    for (uint32_t i = 0; i < hdr.num_iterations; i++) {
+    for (;;) {
+        uint8_t phase;
+        if (readn(fd, &phase, sizeof(phase)) != sizeof(phase))
+            goto fail;
+        if (phase != MIG_PHASE_DIRTY && phase != MIG_PHASE_FINAL) {
+            fprintf(stderr, "[migration] invalid phase: %#x\n", phase);
+            goto fail;
+        }
+
         int dirty = migrate_read_dirty(fd, mem, mem_size);
         if (dirty < 0)
             goto fail;
-        fprintf(stderr, "[migration] iteration %u: applied %d dirty pages\n",
-            i + 1, dirty);
-    }
+        fprintf(stderr, "[migration] phase=%s: applied %d dirty pages\n",
+            phase == MIG_PHASE_FINAL ? "final" : "iter", dirty);
 
-    /* Final dirty pages (stop-and-copy) */
-    int final_dirty = migrate_read_dirty(fd, mem, mem_size);
-    if (final_dirty < 0)
-        goto fail;
-    fprintf(stderr, "[migration] final: applied %d dirty pages\n", final_dirty);
+        if (phase == MIG_PHASE_FINAL)
+            break;
+    }
 
     /* Restore CPU/device state (same apply order as snap_restore) */
     struct kvm_regs regs;
